@@ -21,9 +21,14 @@ from .models import (
     UserStatus,
 )
 
+# Третья группа — общие объекты компании: они не относятся ни к Hotdogger,
+# ни к Moose Café, но заявки по ним оформляются так же.
+SHARED_GROUP = "Общие объекты"
+
 BRANDS = [
     ("Hotdogger", 10),
     ("Moose Café", 20),
+    (SHARED_GROUP, 30),
 ]
 
 OUTLETS = {
@@ -40,6 +45,12 @@ OUTLETS = {
         "Moose 92 мк",
         "Moose Кохи Вахдат",
         "Moose Зайнаб Мол",
+    ],
+    SHARED_GROUP: [
+        "Офис",
+        "Центральный склад Зайнаб Мол",
+        "Цех Пекарня",
+        "Цех Кондитерский",
     ],
 }
 

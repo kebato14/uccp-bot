@@ -212,6 +212,41 @@ async def main() -> None:
         check(found is not None and found.id == master.id,
               "Следующие заявки по вентиляции уходят мастеру автоматически")
 
+        # --- Общие объекты (офис, склад, цеха) ---
+        print("\n--- Общие объекты ---")
+        shared = await session.scalar(select(Brand).where(Brand.name == "Общие объекты"))
+        check(shared is not None, "Группа «Общие объекты» есть в справочнике")
+        names = {
+            o.name
+            for o in (
+                await session.scalars(select(Outlet).where(Outlet.brand_id == shared.id))
+            ).all()
+        }
+        check(
+            {"Офис", "Центральный склад Зайнаб Мол", "Цех Пекарня", "Цех Кондитерский"}
+            <= names,
+            f"Объекты заведены: {len(names)}",
+        )
+
+        bakery = await session.scalar(select(Outlet).where(Outlet.name == "Цех Пекарня"))
+        plumbing = await session.scalar(select(Category).where(Category.code == "plumbing"))
+        asror = await session.scalar(select(User).where(User.full_name == "Асрор"))
+        found = await routing.find_executor(session, plumbing.id, shared.id, bakery.id)
+        check(
+            found is not None and found.id == asror.id,
+            "Сантехника по цеху Пекарня уходит мастеру по обоим брендам",
+        )
+
+        SENT.clear()
+        req_shared = await make_request(session, manager, shared, bakery, plumbing)
+        reason = await flow.dispatch_request(session, bot, req_shared, actor=manager)
+        await session.commit()
+        check(reason in ("ok", "unregistered"), "Заявка по общему объекту находит исполнителя")
+        check(
+            req_shared.outlet.name == "Цех Пекарня" and req_shared.brand.name == "Общие объекты",
+            "Объект и группа сохранены в заявке",
+        )
+
         # --- Отчёты и Excel ---
         print("\n--- Отчёты ---")
         today = dt.date.today()
