@@ -140,6 +140,36 @@ async def main() -> None:
         check(not blocked.can_see_reports and not blocked.can_confirm,
               "У заблокированного нет прав")
 
+        print("\n=== Мастер получает заявки только при верной роли ===")
+        from uccp_bot.db.models import ExecutorAssignment
+        from uccp_bot.services import routing
+
+        # человек с направлением, но с ролью «сотрудник» — не исполнитель
+        fake_master = make_user(108, "Электрик с чужой ролью", RoleCode.STAFF, moose, opera)
+        await session.flush()
+        session.add(ExecutorAssignment(user_id=fake_master.id, category_id=electric.id))
+        # мастер без направлений
+        empty_master = make_user(109, "Мастер без направлений", RoleCode.EXECUTOR)
+        await session.commit()
+
+        found = await routing.find_executor(session, electric.id, moose.id, opera.id)
+        check(found is not None and found.id != fake_master.id,
+              "Направление без роли «Мастер» не делает человека исполнителем")
+        check(found.id == nazrullo.id, "Заявку получает настоящий мастер")
+
+        plumbing = await session.scalar(select(Category).where(Category.code == "plumbing"))
+        none_found = await routing.find_executor(session, plumbing.id, moose.id, opera.id)
+        asror = await session.scalar(select(User).where(User.full_name == "Асрор"))
+        check(none_found is not None and none_found.id == asror.id,
+              "Мастер без направлений не перехватывает чужие заявки")
+
+        nazrullo.role_code = RoleCode.STAFF     # имитируем ошибочную смену роли
+        await session.commit()
+        after = await routing.find_executor(session, electric.id, moose.id, opera.id)
+        check(after is None, "Если мастеру сменили роль, заявки к нему не идут")
+        nazrullo.role_code = RoleCode.EXECUTOR
+        await session.commit()
+
         print("\n=== Подтверждение работ ===")
         check(not nazrullo.can_confirm, "Исполнитель не может подтверждать выполнение")
         check(outlet_admin.can_confirm and ops.can_confirm and staff.can_confirm,

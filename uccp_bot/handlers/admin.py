@@ -195,6 +195,16 @@ async def cb_user_card(
 
     brand = await session.get(Brand, target.brand_id) if target.brand_id else None
     outlet = await session.get(Outlet, target.outlet_id) if target.outlet_id else None
+    directions = (
+        await session.scalars(
+            select(ExecutorAssignment)
+            .where(
+                ExecutorAssignment.user_id == target.id,
+                ExecutorAssignment.is_active.is_(True),
+            )
+            .options(selectinload(ExecutorAssignment.category))
+        )
+    ).all()
 
     lines = [
         f"👤 <b>{esc(target.full_name)}</b>",
@@ -211,6 +221,20 @@ async def cb_user_card(
         lines.append(f"Доступ выдан: {fmt_dt(target.approved_at)}")
     if target.reject_reason:
         lines.append(f"Причина отклонения: {esc(target.reject_reason)}")
+
+    # заявки уходят только тем, у кого роль «Мастер» И есть направления
+    if target.role_code == RoleCode.EXECUTOR and not directions:
+        lines.append(
+            "\n❗️ <b>У мастера не выбрано ни одного направления</b> — "
+            "заявки ему приходить не будут. Нажмите «🗂 Направления мастера»."
+        )
+    elif target.role_code != RoleCode.EXECUTOR and directions:
+        names = ", ".join(a.category.name for a in directions if a.category)
+        lines.append(
+            f"\n❗️ <b>Направления назначены ({esc(names)}), но роль не «Мастер»</b> — "
+            "заявки этому человеку приходить не будут. Смените роль на "
+            "«Мастер / исполнитель» или снимите направления."
+        )
 
     kb = InlineKeyboardBuilder()
     if target.status == UserStatus.PENDING:
@@ -455,14 +479,39 @@ async def cb_role_set(
         await call.answer(texts.NO_ACCESS, show_alert=True)
         return
     target = await session.get(User, callback_data.id)
-    target.role_code = callback_data.value
+    new_role = callback_data.value
+    target.role_code = new_role
     if target.status == UserStatus.PENDING:
         target.status = UserStatus.ACTIVE
         target.approved_at = utcnow()
         target.approved_by_id = user.id
     target.sync_flags()
     await session.commit()
-    await call.answer("Роль изменена")
+
+    has_directions = bool(
+        await session.scalar(
+            select(ExecutorAssignment.id).where(
+                ExecutorAssignment.user_id == target.id,
+                ExecutorAssignment.is_active.is_(True),
+            )
+        )
+    )
+    if new_role == RoleCode.EXECUTOR and not has_directions:
+        await call.answer(
+            "Роль изменена. Теперь выберите направления — без них заявки "
+            "мастеру приходить не будут.",
+            show_alert=True,
+        )
+        await cb_exec_card(call, AdminCB(act="exec_card", id=target.id), session, user)
+        return
+    if new_role != RoleCode.EXECUTOR and has_directions:
+        await call.answer(
+            "Роль изменена. Внимание: у человека остались направления мастера, "
+            "но заявки по ним ему больше не пойдут.",
+            show_alert=True,
+        )
+    else:
+        await call.answer("Роль изменена")
     if target.tg_id:
         try:
             await bot.send_message(
