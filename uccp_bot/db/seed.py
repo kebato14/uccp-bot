@@ -146,6 +146,16 @@ async def seed(session: AsyncSession) -> None:
     await session.flush()
 
     # --- исполнители из ТЗ ---
+    # Только при первом наполнении: если в системе уже есть хотя бы один мастер,
+    # справочником управляет администратор — удалённые или переименованные
+    # им записи заново не создаём.
+    has_executors = await session.scalar(
+        select(func.count(User.id)).where(User.role_code == RoleCode.EXECUTOR)
+    )
+    if has_executors:
+        await session.commit()
+        return
+
     for spec in EXECUTORS:
         user = await session.scalar(
             select(User).where(User.full_name == spec["full_name"], User.role_code == RoleCode.EXECUTOR)
