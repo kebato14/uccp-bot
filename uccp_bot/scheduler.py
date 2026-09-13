@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
@@ -15,7 +16,7 @@ from sqlalchemy.orm import selectinload
 
 from .config import config
 from .db.models import Request, RoleCode, Status, User
-from .services import excel, flow, gsheets, notify, reports
+from .services import backup as backup_service, excel, flow, gsheets, notify, reports
 from .services.cards import REQUEST_LOAD_OPTIONS
 from .utils import esc, fmt_dt, local_from_utc, now_local, utcnow
 
@@ -210,6 +211,55 @@ async def monthly_google_report(
 
 
 
+async def daily_backup(session_maker: async_sessionmaker, bot: Bot) -> None:
+    """Ежедневная резервная копия базы (п. «сохранность данных»)."""
+    async with session_maker() as session:
+        recipients = await _recipients(session)
+        try:
+            result = await backup_service.run_backup()
+        except Exception as exc:
+            log.exception("Резервное копирование не выполнено: %s", exc)
+            text = (
+                "❌ <b>Резервная копия базы не создана!</b>\n"
+                f"Причина: <code>{esc(str(exc)[:300])}</code>\n\n"
+                "Это важно: в базе все заявки и пользователи. "
+                "Проверьте место на диске и права на папку."
+            )
+            for user in recipients:
+                await notify.send_to_user(bot, user, text)
+            return
+
+        lines = [
+            "💾 <b>Резервная копия базы создана</b>",
+            f"Файл: <code>{esc(os.path.basename(result.path))}</code> · "
+            f"{result.size_kb} КБ",
+        ]
+        if result.drive_url:
+            lines.append(f"☁️ Google Диск: {esc(result.drive_url)}")
+        elif result.drive_error:
+            lines.append(f"⚠️ На Google Диск не ушла: {esc(result.drive_error)}")
+        else:
+            lines.append(
+                "ℹ️ Копия на Google Диск не отправлена — доступ к Google не настроен."
+            )
+        text = "\n".join(lines)
+
+        for user in recipients:
+            if not user.tg_id:
+                continue
+            await notify.send_to_user(bot, user, text)
+            if config.backup_to_telegram:
+                try:
+                    await bot.send_document(
+                        user.tg_id,
+                        FSInputFile(result.path),
+                        caption="Копия базы УЦЦП. Сохраните — по ней можно "
+                        "полностью восстановить бота.",
+                    )
+                except Exception as exc:
+                    log.warning("Копию не удалось отправить в Telegram: %s", exc)
+
+
 def setup_scheduler(session_maker: async_sessionmaker, bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=config.timezone)
     scheduler.add_job(
@@ -224,6 +274,13 @@ def setup_scheduler(session_maker: async_sessionmaker, bot: Bot) -> AsyncIOSched
         IntervalTrigger(minutes=config.overdue_check_minutes),
         args=(session_maker, bot),
         id="check_org_overdue",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        daily_backup,
+        CronTrigger(hour=config.backup_hour, minute=20),
+        args=(session_maker, bot),
+        id="daily_backup",
         replace_existing=True,
     )
     scheduler.add_job(

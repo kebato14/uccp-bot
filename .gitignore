@@ -7,3 +7,4 @@ exports/
 .venv/
 google_credentials.json
 .DS_Store
+backups/

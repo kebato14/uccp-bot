@@ -331,6 +331,26 @@ async def month_requests(session: AsyncSession, year: int, month: int) -> List[R
 # --------------------------------------------------------------------------- #
 # Работа с Google API (синхронная, выполняется в отдельном потоке)
 # --------------------------------------------------------------------------- #
+def load_credentials():
+    """Учётные данные Google: ключ сервисного аккаунта либо вход пользователя (ADC)."""
+    if _valid_key_file(config.google_credentials_file):
+        from google.oauth2.service_account import Credentials
+
+        return Credentials.from_service_account_file(
+            config.google_credentials_file, scopes=SCOPES
+        )
+    if os.path.exists(adc_path()):
+        import google.auth
+
+        creds, _ = google.auth.default(scopes=SCOPES)
+        return creds
+    raise GoogleSheetsNotConfigured(
+        "Не найдены учётные данные Google: ни ключ сервисного аккаунта "
+        f"({config.google_credentials_file}), ни ADC ({adc_path()}). "
+        "См. README, раздел «Google Sheets»."
+    )
+
+
 def _client():
     """Авторизация двумя способами.
 
@@ -342,25 +362,7 @@ def _client():
     """
     import gspread
 
-    if _valid_key_file(config.google_credentials_file):
-        from google.oauth2.service_account import Credentials
-
-        creds = Credentials.from_service_account_file(
-            config.google_credentials_file, scopes=SCOPES
-        )
-        return gspread.authorize(creds)
-
-    if os.path.exists(adc_path()):
-        import google.auth
-
-        creds, _ = google.auth.default(scopes=SCOPES)
-        return gspread.authorize(creds)
-
-    raise GoogleSheetsNotConfigured(
-        "Не найдены учётные данные Google: ни ключ сервисного аккаунта "
-        f"({config.google_credentials_file}), ни ADC ({adc_path()}). "
-        "См. README, раздел «Google Sheets»."
-    )
+    return gspread.authorize(load_credentials())
 
 
 def _valid_key_file(path: str) -> bool:

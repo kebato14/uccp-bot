@@ -5,13 +5,16 @@ from typing import Optional
 
 from aiogram import Bot, F, Router, types
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import FSInputFile, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+import os
+
 from .. import texts
+from ..config import config
 from ..callbacks import AdminCB, ApprCB
 from ..db.models import (
     Brand,
@@ -23,6 +26,7 @@ from ..db.models import (
     UserStatus,
 )
 from ..keyboards.common import BTN_ADMIN, cancel_kb, main_menu
+from ..services import backup as backup_service
 from ..states import AdminFlow
 from ..utils import esc, fmt_dt, normalize_phone, utcnow
 from .lists import show_list
@@ -45,6 +49,7 @@ def _root_kb() -> types.InlineKeyboardMarkup:
         ("👥 Пользователи и роли", "users"),
         ("🏬 Торговые точки", "outlets"),
         ("🗂 Категории", "categories"),
+        ("💾 Резервная копия", "backup"),
     ]
     for label, act in buttons:
         kb.button(text=label, callback_data=AdminCB(act=act).pack())
@@ -123,6 +128,49 @@ async def cb_requests(
     ]
     await call.answer()
     await show_list(call.message, session, user, kind, edit=True)
+
+
+@router.callback_query(AdminCB.filter(F.act == "backup"))
+async def cb_backup(
+    call: types.CallbackQuery, user: Optional[User], bot: Bot
+) -> None:
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    await call.answer("Создаю копию…")
+
+    copies = backup_service.list_backups()
+    drive = (
+        "☁️ Google Диск подключён"
+        if backup_service.drive_available()
+        else "ℹ️ Google Диск не подключён — копия только здесь и на компьютере"
+    )
+    try:
+        result = await backup_service.run_backup(tag="ручная")
+    except Exception as exc:
+        await call.message.answer(
+            f"❌ Не удалось создать копию: <code>{esc(str(exc)[:300])}</code>"
+        )
+        return
+
+    lines = [
+        "💾 <b>Резервная копия создана</b>",
+        f"Файл: <code>{esc(os.path.basename(result.path))}</code> · {result.size_kb} КБ",
+        f"Хранится копий: {len(copies) + 1} (последние {config.backup_keep})",
+        drive,
+    ]
+    if result.drive_url:
+        lines.append(f"Ссылка: {esc(result.drive_url)}")
+    elif result.drive_error:
+        lines.append(f"⚠️ На Диск не ушла: {esc(result.drive_error)}")
+    lines.append(
+        "\nКопия создаётся автоматически каждый день — файл приходит сюда же."
+    )
+    await call.message.answer("\n".join(lines))
+    await call.message.answer_document(
+        FSInputFile(result.path),
+        caption="Копия базы УЦЦП. Сохраните — по ней можно полностью восстановить бота.",
+    )
 
 
 # --------------------------------------------------------------------------- #

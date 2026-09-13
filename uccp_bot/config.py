@@ -44,6 +44,10 @@ class Config:
     google_sheet_title: str = os.getenv("GOOGLE_SHEET_TITLE", "Отчёты УЦЦП")
     google_share_email: str = os.getenv("GOOGLE_SHARE_EMAIL", "")
     google_drive_folder_id: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    backup_dir: str = os.getenv("BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
+    backup_keep: int = int(os.getenv("BACKUP_KEEP", "14"))
+    backup_hour: int = int(os.getenv("BACKUP_HOUR", "3"))
+    backup_to_telegram: bool = os.getenv("BACKUP_TO_TELEGRAM", "1") not in ("0", "false", "")
     monthly_report_day: int = int(os.getenv("MONTHLY_REPORT_DAY", "1"))
     monthly_report_hour: int = int(os.getenv("MONTHLY_REPORT_HOUR", "1"))
 
