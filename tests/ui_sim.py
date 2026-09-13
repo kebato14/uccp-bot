@@ -294,6 +294,36 @@ async def main() -> None:
         check(approved.role_code == RoleCode.OUTLET_ADMIN, "Роль назначена администратором")
         check(approved.outlet_id is not None, "Точка привязана")
 
+    # подтверждение переживает перезапуск бота: состояние не в памяти, а в БД
+    print("\n=== Устойчивость подтверждения к перезапуску ===")
+    restart_client = Client(bot, dp, 5005, "Тестов Тест", username="testov")
+    await restart_client.send("/start")
+    await restart_client.send("Тест")
+    await restart_client.send("Тестов")
+    await restart_client.send("Менеджер смены")
+    await restart_client.click("Moose Café")
+    await restart_client.click("Moose TCell")
+
+    OUT.clear()
+    await admin.send("⚙️ Администрирование")
+    await admin.click("Заявки на регистрацию")
+    await admin.click("Тестов")
+    await admin.click("Подтвердить")
+    await admin.click("Администратор точки")
+
+    # имитируем перезапуск бота: память FSM теряется
+    await dp.fsm.get_context(bot, chat_id=5001, user_id=5001).clear()
+    check(True, "Бот «перезапущен» посреди подтверждения")
+
+    await admin.click("Moose Café")
+    await admin.click("Moose TCell")
+    async with SessionMaker() as session:
+        restored = await session.scalar(select(User).where(User.tg_id == 5005))
+        check(restored.status == UserStatus.ACTIVE,
+              "Подтверждение доведено до конца после перезапуска")
+        check(restored.role_code == RoleCode.OUTLET_ADMIN, "Роль сохранена")
+        check(restored.outlet_id is not None, "Объект сохранён")
+
     # ---------------- мастер: та же схема ----------------
     print("\n=== Регистрация мастера ===")
     async with SessionMaker() as session:
@@ -326,7 +356,7 @@ async def main() -> None:
           "Администратор выбирает направление мастера")
     await admin.click("Вентиляция")
     await admin.click("Готово")
-    await admin.click("Оба бренда")
+    await admin.click("Все бренды и объекты")
     check("Мастер — вентиляция" in OUT.texts_for(5004),
           "Мастеру сообщена роль с направлением")
     check("получать назначенные вам заявки" in OUT.texts_for(5004),

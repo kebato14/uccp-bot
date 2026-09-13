@@ -161,8 +161,7 @@ async def cb_approve(
         await call.answer("Пользователь не найден", show_alert=True)
         return
 
-    await state.set_state(Approval.role)
-    await state.update_data(target_id=target.id, directions=[])
+    await state.clear()
     await call.answer()
     await call.message.edit_text(
         f"Подтверждение регистрации <b>№{target.id}</b>\n"
@@ -188,38 +187,44 @@ def _roles_kb(user_id: int) -> types.InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-@router.callback_query(Approval.role, ApprCB.filter(F.act == "role"))
+@router.callback_query(ApprCB.filter(F.act == "role"))
 async def cb_role(
     call: types.CallbackQuery,
     callback_data: ApprCB,
-    state: FSMContext,
     session: AsyncSession,
     user: Optional[User],
     bot: Bot,
 ) -> None:
+    """Роль сохраняется сразу; доступ откроется только на последнем шаге."""
     if not _require_admin(user):
         await call.answer(texts.NO_ACCESS, show_alert=True)
         return
+    target = await session.get(User, callback_data.user_id)
+    if target is None:
+        await call.answer("Пользователь не найден", show_alert=True)
+        return
+
     role = callback_data.value
-    await state.update_data(role=role)
+    target.role_code = role
+    await session.commit()
     await call.answer()
 
     if role == RoleCode.ADMIN:
-        await _finish(call, state, session, user, bot)
+        await _finish(call, session, user, bot, target)
         return
     if role == RoleCode.EXECUTOR:
-        await state.set_state(Approval.directions)
         await call.message.edit_text(
+            f"{esc(target.full_name)} — <b>{RoleCode.TITLES[role]}</b>\n\n"
             "Шаг 2. Отметьте <b>направления мастера</b> — по ним ему будут "
             "автоматически приходить заявки:",
-            reply_markup=await _directions_kb(session, callback_data.user_id, []),
+            reply_markup=await _directions_kb(session, target.id),
         )
         return
 
-    await state.set_state(Approval.brand)
     await call.message.edit_text(
-        "Шаг 2. Выберите <b>бренд</b>:",
-        reply_markup=await _brands_kb(session, callback_data.user_id, role),
+        f"{esc(target.full_name)} — <b>{RoleCode.TITLES[role]}</b>\n\n"
+        "Шаг 2. Выберите <b>бренд</b> или группу объектов:",
+        reply_markup=await _brands_kb(session, target.id, role),
     )
 
 
@@ -239,16 +244,34 @@ async def _brands_kb(
         )
     if role == RoleCode.EXECUTOR:
         kb.button(
-            text="Оба бренда",
+            text="Все бренды и объекты",
             callback_data=ApprCB(act="brand", user_id=user_id, value="0").pack(),
         )
     kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=ApprCB(act="approve", user_id=user_id).pack()
+        )
+    )
     return kb.as_markup()
 
 
+async def _selected_directions(session: AsyncSession, user_id: int) -> List[int]:
+    rows = (
+        await session.scalars(
+            select(ExecutorAssignment.category_id).where(
+                ExecutorAssignment.user_id == user_id
+            )
+        )
+    ).all()
+    return list(rows)
+
+
 async def _directions_kb(
-    session: AsyncSession, user_id: int, selected: List[int]
+    session: AsyncSession, user_id: int
 ) -> types.InlineKeyboardMarkup:
+    """Отметки читаются из БД — состояние переживает перезапуск бота."""
+    selected = await _selected_directions(session, user_id)
     categories = (
         await session.scalars(
             select(Category).where(Category.is_active.is_(True)).order_by(Category.sort_order)
@@ -270,51 +293,60 @@ async def _directions_kb(
     return kb.as_markup()
 
 
-@router.callback_query(Approval.directions, ApprCB.filter(F.act == "dir"))
+@router.callback_query(ApprCB.filter(F.act == "dir"))
 async def cb_direction(
     call: types.CallbackQuery,
     callback_data: ApprCB,
-    state: FSMContext,
     session: AsyncSession,
+    user: Optional[User],
 ) -> None:
-    data = await state.get_data()
-    selected: List[int] = list(data.get("directions", []))
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
     cat_id = int(callback_data.value)
-    if cat_id in selected:
-        selected.remove(cat_id)
+    existing = await session.scalar(
+        select(ExecutorAssignment).where(
+            ExecutorAssignment.user_id == callback_data.user_id,
+            ExecutorAssignment.category_id == cat_id,
+        )
+    )
+    if existing is not None:
+        await session.delete(existing)
     else:
-        selected.append(cat_id)
-    await state.update_data(directions=selected)
+        session.add(
+            ExecutorAssignment(user_id=callback_data.user_id, category_id=cat_id)
+        )
+    await session.commit()
     await call.answer()
     await call.message.edit_reply_markup(
-        reply_markup=await _directions_kb(session, callback_data.user_id, selected)
+        reply_markup=await _directions_kb(session, callback_data.user_id)
     )
 
 
-@router.callback_query(Approval.directions, ApprCB.filter(F.act == "dir_done"))
+@router.callback_query(ApprCB.filter(F.act == "dir_done"))
 async def cb_directions_done(
     call: types.CallbackQuery,
     callback_data: ApprCB,
-    state: FSMContext,
     session: AsyncSession,
+    user: Optional[User],
 ) -> None:
-    data = await state.get_data()
-    if not data.get("directions"):
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    if not await _selected_directions(session, callback_data.user_id):
         await call.answer("Отметьте хотя бы одно направление", show_alert=True)
         return
-    await state.set_state(Approval.brand)
     await call.answer()
     await call.message.edit_text(
-        "Шаг 3. По каким брендам работает мастер?",
+        "Шаг 3. По каким брендам и объектам работает мастер?",
         reply_markup=await _brands_kb(session, callback_data.user_id, RoleCode.EXECUTOR),
     )
 
 
-@router.callback_query(Approval.brand, ApprCB.filter(F.act == "brand"))
+@router.callback_query(ApprCB.filter(F.act == "brand"))
 async def cb_brand(
     call: types.CallbackQuery,
     callback_data: ApprCB,
-    state: FSMContext,
     session: AsyncSession,
     user: Optional[User],
     bot: Bot,
@@ -322,15 +354,26 @@ async def cb_brand(
     if not _require_admin(user):
         await call.answer(texts.NO_ACCESS, show_alert=True)
         return
+    target = await session.get(User, callback_data.user_id)
     brand_id = int(callback_data.value) or None
-    await state.update_data(brand_id=brand_id)
-    data = await state.get_data()
-    role = data.get("role")
+    target.brand_id = brand_id
+    if target.role_code == RoleCode.EXECUTOR:
+        # направления мастера привязываем к выбранному бренду
+        for assignment in (
+            await session.scalars(
+                select(ExecutorAssignment).where(
+                    ExecutorAssignment.user_id == target.id
+                )
+            )
+        ).all():
+            assignment.brand_id = brand_id
+    await session.commit()
     await call.answer()
 
-    # операционный директор и мастер к конкретной точке не привязываются
-    if role in (RoleCode.OPS_DIRECTOR, RoleCode.EXECUTOR) or brand_id is None:
-        await _finish(call, state, session, user, bot)
+    if target.role_code in (RoleCode.OPS_DIRECTOR, RoleCode.EXECUTOR) or brand_id is None:
+        target.outlet_id = None
+        await session.commit()
+        await _finish(call, session, user, bot, target)
         return
 
     outlets = (
@@ -344,22 +387,24 @@ async def cb_brand(
     for outlet in outlets:
         kb.button(
             text=outlet.name,
-            callback_data=ApprCB(
-                act="outlet", user_id=callback_data.user_id, value=str(outlet.id)
-            ).pack(),
+            callback_data=ApprCB(act="outlet", user_id=target.id, value=str(outlet.id)).pack(),
         )
     kb.adjust(1)
-    await state.set_state(Approval.outlet)
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=ApprCB(act="role", user_id=target.id,
+                                                 value=target.role_code).pack()
+        )
+    )
     await call.message.edit_text(
-        "Шаг 3. Выберите <b>торговую точку</b>:", reply_markup=kb.as_markup()
+        "Шаг 3. Выберите <b>объект</b>:", reply_markup=kb.as_markup()
     )
 
 
-@router.callback_query(Approval.outlet, ApprCB.filter(F.act == "outlet"))
+@router.callback_query(ApprCB.filter(F.act == "outlet"))
 async def cb_outlet(
     call: types.CallbackQuery,
     callback_data: ApprCB,
-    state: FSMContext,
     session: AsyncSession,
     user: Optional[User],
     bot: Bot,
@@ -367,72 +412,45 @@ async def cb_outlet(
     if not _require_admin(user):
         await call.answer(texts.NO_ACCESS, show_alert=True)
         return
-    await state.update_data(outlet_id=int(callback_data.value) or None)
+    target = await session.get(User, callback_data.user_id)
+    target.outlet_id = int(callback_data.value) or None
+    await session.commit()
     await call.answer()
-    await _finish(call, state, session, user, bot)
+    await _finish(call, session, user, bot, target)
 
 
 async def _finish(
     call: types.CallbackQuery,
-    state: FSMContext,
     session: AsyncSession,
     admin: User,
     bot: Bot,
+    target: User,
 ) -> None:
-    data = await state.get_data()
-    target = await session.get(User, data["target_id"])
-    role = data["role"]
-
-    target.role_code = role
+    """Последний шаг: выдаём доступ и уведомляем человека."""
     target.status = UserStatus.ACTIVE
     target.approved_at = utcnow()
     target.approved_by_id = admin.id
     target.reject_reason = None
     target.sync_flags()
+    await session.commit()
 
-    if role in (RoleCode.STAFF, RoleCode.OUTLET_ADMIN):
-        target.brand_id = data.get("brand_id")
-        target.outlet_id = data.get("outlet_id")
-    elif role == RoleCode.OPS_DIRECTOR:
-        target.brand_id = data.get("brand_id")
-        target.outlet_id = None
-    elif role == RoleCode.EXECUTOR:
-        target.brand_id = data.get("brand_id")
-        target.outlet_id = None
+    role = target.role_code
+    brand = await session.get(Brand, target.brand_id) if target.brand_id else None
+    outlet = await session.get(Outlet, target.outlet_id) if target.outlet_id else None
 
-    directions: List[int] = data.get("directions", [])
     names: List[str] = []
     if role == RoleCode.EXECUTOR:
-        for cat_id in directions:
-            exists = await session.scalar(
-                select(ExecutorAssignment).where(
-                    ExecutorAssignment.user_id == target.id,
-                    ExecutorAssignment.category_id == cat_id,
-                )
-            )
-            if exists is None:
-                session.add(
-                    ExecutorAssignment(
-                        user_id=target.id,
-                        category_id=cat_id,
-                        brand_id=data.get("brand_id"),
-                    )
-                )
+        for cat_id in await _selected_directions(session, target.id):
             category = await session.get(Category, cat_id)
             if category:
                 names.append(category.name)
 
-    await session.commit()
-    await state.clear()
-
-    brand = await session.get(Brand, target.brand_id) if target.brand_id else None
-    outlet = await session.get(Outlet, target.outlet_id) if target.outlet_id else None
     scope_lines = {
-        RoleCode.STAFF: f"Точка: {outlet.name if outlet else '—'}",
-        RoleCode.OUTLET_ADMIN: f"Точка: {outlet.name if outlet else '—'}",
+        RoleCode.STAFF: f"Объект: {outlet.name if outlet else '—'}",
+        RoleCode.OUTLET_ADMIN: f"Объект: {outlet.name if outlet else '—'}",
         RoleCode.OPS_DIRECTOR: f"Бренд: {brand.name if brand else '—'}",
         RoleCode.EXECUTOR: "Направления: " + (", ".join(names) if names else "—")
-        + (f"\nБренд: {brand.name}" if brand else "\nБренды: оба"),
+        + (f"\nБренд: {brand.name}" if brand else "\nБренды и объекты: все"),
         RoleCode.ADMIN: "Доступ: полный",
     }
     scope = scope_lines.get(role, "")
@@ -441,7 +459,6 @@ async def _finish(
     if role == RoleCode.EXECUTOR and names:
         role_label = f"Мастер — {names[0].lower()}" if len(names) == 1 else "Мастер"
 
-    # уведомляем пользователя
     if target.tg_id:
         try:
             await bot.send_message(
@@ -457,9 +474,7 @@ async def _finish(
                 ),
                 reply_markup=main_menu(target),
             )
-            await bot.send_message(
-                target.tg_id, texts.ROLE_INSTRUCTIONS.get(role, "")
-            )
+            await bot.send_message(target.tg_id, texts.ROLE_INSTRUCTIONS.get(role, ""))
         except Exception:
             pass
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import (
@@ -34,7 +34,7 @@ BRANDS = [
 OUTLETS = {
     "Hotdogger": [
         "Hotdogger 82-мк",
-        "Hotdogger Сема мол",
+        "Hotdogger Сиема мол",
         "Hotdogger Куруши Кабир",
         "Hotdogger Созидание",
         "Hotdogger Аэропорт",
@@ -114,16 +114,20 @@ async def seed(session: AsyncSession) -> None:
             session.add(Role(code=code, title=RoleCode.TITLES[code], sort_order=(i + 1) * 10))
 
     # --- бренды и точки ---
+    # Точки создаём только при первом наполнении бренда. Иначе переименованная
+    # или отключённая администратором точка появлялась бы заново после
+    # каждого перезапуска (и в справочнике возникали дубли).
     for name, sort in BRANDS:
         brand = await _get_or_create_brand(session, name, sort)
+        has_outlets = await session.scalar(
+            select(func.count(Outlet.id)).where(Outlet.brand_id == brand.id)
+        )
+        if has_outlets:
+            continue
         for idx, outlet_name in enumerate(OUTLETS.get(name, [])):
-            exists = await session.scalar(
-                select(Outlet).where(Outlet.brand_id == brand.id, Outlet.name == outlet_name)
+            session.add(
+                Outlet(brand_id=brand.id, name=outlet_name, sort_order=(idx + 1) * 10)
             )
-            if exists is None:
-                session.add(
-                    Outlet(brand_id=brand.id, name=outlet_name, sort_order=(idx + 1) * 10)
-                )
 
     # --- категории ---
     for code, name, emoji, photo_required, sort in CATEGORIES:
