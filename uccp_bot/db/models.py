@@ -242,6 +242,9 @@ class User(Base):
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     is_registered: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Мастер на фиксированной ежемесячной оплате (например, обслуживание
+    # кофемашин): при закрытии заявки стоимость работ и материалов не спрашиваем.
+    fixed_payment: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
     applied_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
@@ -332,6 +335,14 @@ class User(Base):
         )
 
     @property
+    def payment_title(self) -> str:
+        return (
+            "фиксированная ежемесячная"
+            if self.fixed_payment
+            else "по каждой заявке"
+        )
+
+    @property
     def can_see_reports(self) -> bool:
         return self.is_approved and self.role_code in (
             RoleCode.OUTLET_ADMIN,
@@ -412,6 +423,10 @@ class Request(Base):
     is_overdue: Mapped[bool] = mapped_column(Boolean, default=False)
     overdue_notified_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
     source_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Работа входит в фиксированную ежемесячную оплату мастера — отдельной
+    # суммы к оплате по заявке нет. Отметка ставится в момент выполнения,
+    # поэтому история остаётся верной даже если условия мастера поменяются.
+    cost_exempt: Mapped[bool] = mapped_column(Boolean, default=False)
 
     author: Mapped[User] = relationship(foreign_keys=[author_id])
     executor: Mapped[Optional[User]] = relationship(foreign_keys=[executor_id])
@@ -438,6 +453,13 @@ class Request(Base):
     @property
     def total_cost(self) -> float:
         return float(self.work_cost or 0) + float(self.material_cost or 0)
+
+    @property
+    def cost_title(self) -> str:
+        """Как показывать деньги в карточке и отчётах."""
+        if self.cost_exempt:
+            return "входит в фиксированную месячную оплату мастера"
+        return ""
 
     @property
     def status_title(self) -> str:

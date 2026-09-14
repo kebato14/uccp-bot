@@ -24,7 +24,7 @@ from sqlalchemy import func, select  # noqa: E402
 from uccp_bot.db.base import SessionMaker, init_db  # noqa: E402
 from uccp_bot.db.models import (  # noqa: E402
     Attachment, Brand, Category, Cost, Outlet, Priority, Request,
-    RequestStatusHistory, RoleCode, Status, User, UserStatus,
+    ExecutorAssignment, RequestStatusHistory, RoleCode, Status, User, UserStatus,
 )
 from uccp_bot.db.seed import seed  # noqa: E402
 from uccp_bot.services import excel, flow, history, reports, routing  # noqa: E402
@@ -246,6 +246,41 @@ async def main() -> None:
             req_shared.outlet.name == "Цех Пекарня" and req_shared.brand.name == "Общие объекты",
             "Объект и группа сохранены в заявке",
         )
+
+        # --- Фиксированная месячная оплата мастера ---
+        print("\n--- Мастер на фиксированной оплате ---")
+        coffee = await session.scalar(select(Category).where(Category.code == "coffee"))
+        check(coffee is not None, "Категория «Кофемашины» есть в справочнике")
+
+        barista_master = User(
+            tg_id=4001, full_name="Мастер по кофемашинам", last_name="Мастер",
+            role_code=RoleCode.EXECUTOR, status=UserStatus.ACTIVE, is_active=True,
+            is_registered=True, fixed_payment=True,
+        )
+        session.add(barista_master)
+        await session.flush()
+        session.add(ExecutorAssignment(user_id=barista_master.id, category_id=coffee.id))
+        await session.commit()
+
+        found = await routing.find_executor(session, coffee.id, brand.id, outlet.id)
+        check(found is not None and found.id == barista_master.id,
+              "Заявки по кофемашинам уходят профильному мастеру")
+
+        req_coffee = await make_request(session, manager, brand, outlet, coffee)
+        req_coffee.executor_id = barista_master.id
+        req_coffee.executor_comment = "Промывка группы, замена фильтра."
+        req_coffee.done_at = utcnow()
+        req_coffee.status = Status.DONE
+        req_coffee.cost_exempt = True          # стоимость не тарифицируется
+        await session.commit()
+
+        check(req_coffee.work_cost is None and req_coffee.material_cost is None,
+              "Суммы по заявке не заводятся")
+        check(req_coffee.total_cost == 0, "В расходы такая заявка не попадает")
+        card = render_card(req_coffee)
+        check("фиксированная ежемесячная" in card.lower(),
+              "В карточке пометка вместо стоимости")
+        check("Работы:" not in card, "Строк со стоимостью в карточке нет")
 
         # --- Отчёты и Excel ---
         print("\n--- Отчёты ---")

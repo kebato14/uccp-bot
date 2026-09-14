@@ -528,6 +528,85 @@ async def main() -> None:
     check("не зарегистрирован" in OUT.texts_for(5001),
           "Админ предупреждён: мастер не активировал бота")
 
+    # ---------------- мастер на фиксированной оплате ----------------
+    print("\n=== Мастер по кофемашинам: завершение без стоимости ===")
+    coffee_master = Client(bot, dp, 5006, "Хакимов Фируз", username="firuz")
+    OUT.clear()
+    await coffee_master.send("/start")
+    await coffee_master.send("Фируз")
+    await coffee_master.send("Хакимов")
+    await coffee_master.send("Мастер по кофемашинам")
+    await coffee_master.click("Оба бренда")
+
+    await admin.send("⚙️ Администрирование")
+    await admin.click("Заявки на регистрацию")
+    await admin.click("Хакимов")
+    await admin.click("Подтвердить")
+    await admin.click("Мастер / исполнитель")
+    await admin.click("Кофемашины")
+    await admin.click("Готово")
+    await admin.click("Все бренды и объекты")
+
+    # переводим на фиксированную месячную оплату
+    OUT.clear()
+    await admin.send("⚙️ Администрирование")
+    await admin.click("Пользователи и роли")
+    await admin.click("Хакимов")
+    check(admin.has_button("Оплата: фиксированная"), "В карточке есть переключатель оплаты")
+    await admin.click("Оплата: фиксированная")
+    async with SessionMaker() as session:
+        cm = await session.scalar(select(User).where(User.tg_id == 5006))
+        check(cm.fixed_payment, "Мастер переведён на фиксированную оплату")
+    check("стоимость вводить не нужно" in OUT.texts_for(5006),
+          "Мастеру сообщили об изменении условий")
+
+    # заявка по кофемашине
+    OUT.clear()
+    await manager.send("➕ Новая заявка")
+    await manager.click("Moose Café")
+    await manager.click("Moose Opera")
+    await manager.click("Кофемашины")
+    await manager.send("Кофемашина не держит давление, слабая экстракция.")
+    await manager.click("Пропустить")
+    await manager.click("Высокий")
+    await manager.click("Завтра")
+    await manager.click("10:00")
+    await manager.click("Отправить")
+    check("Новая заявка" in OUT.texts_for(5006), "Заявка ушла мастеру по кофемашинам")
+
+    await coffee_master.click("Принять")
+    await coffee_master.click("Начать работу")
+    await coffee_master.click("Работа выполнена")
+    check("какие работы проведены" in OUT.texts_for(5006).lower(),
+          "Спрашивают только перечень работ")
+    check("Шаг 1 из 2" in OUT.texts_for(5006), "Всего два шага вместо четырёх")
+    check("Стоимость указывать не нужно" in OUT.texts_for(5006),
+          "Мастеру сразу сказано, что деньги вводить не нужно")
+
+    OUT.clear()
+    await coffee_master.send("Промывка группы, замена фильтра, калибровка помола.")
+    check("не обязательно" in OUT.texts_for(5006), "Фото необязательное")
+    await coffee_master.send("пропустить")
+    report_text = OUT.texts_for(5006)
+    check("отмечена как выполненная" in report_text, "Заявка закрыта без фото и без сумм")
+    check("стоимость" in report_text.lower() and "фиксированную" in report_text.lower(),
+          "Мастеру объяснили, почему суммы нет")
+    check("Укажите" not in report_text or "стоимость работ" not in report_text,
+          "Вопроса о стоимости не было")
+
+    async with SessionMaker() as session:
+        creq = await session.scalar(
+            select(Request).where(Request.status == Status.DONE).order_by(Request.id.desc())
+        )
+        check(creq.cost_exempt, "На заявке отметка «фиксированная оплата»")
+        check(creq.work_cost is None and creq.material_cost is None,
+              "Суммы не заведены вовсе")
+        check("Промывка группы" in creq.executor_comment, "Перечень работ сохранён")
+
+    # в карточке у менеджера — пометка вместо сумм
+    check("фиксированная ежемесячная" in OUT.texts_for(5002).lower(),
+          "В карточке заявки видно, что суммы нет")
+
     # ---------------- организационные заявки УЦЦП ----------------
     print("\n=== Модуль организационных заявок УЦЦП ===")
     OUT.clear()

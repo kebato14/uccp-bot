@@ -342,14 +342,24 @@ async def act_done(
     if not _is_executor_of(user, request):
         await call.answer(texts.NO_ACCESS, show_alert=True)
         return
+    fixed = bool(user.fixed_payment)
     await state.set_state(ExecutorFlow.done_comment)
-    await state.update_data(request_id=request.id, done_media=[])
+    await state.update_data(request_id=request.id, done_media=[], fixed_payment=fixed)
     await call.answer()
-    await call.message.answer(
-        "Шаг 1 из 4. Опишите, <b>что было сделано</b>.\n"
-        "Например: <i>Заменён подшипник двигателя вытяжки, проверена тяга.</i>",
-        reply_markup=cancel_kb(),
-    )
+    if fixed:
+        await call.message.answer(
+            "Шаг 1 из 2. Опишите, <b>какие работы проведены</b>.\n"
+            "Например: <i>Промывка группы, замена фильтра, калибровка помола.</i>\n\n"
+            "Стоимость указывать не нужно — ваша работа входит в фиксированную "
+            "ежемесячную оплату.",
+            reply_markup=cancel_kb(),
+        )
+    else:
+        await call.message.answer(
+            "Шаг 1 из 4. Опишите, <b>что было сделано</b>.\n"
+            "Например: <i>Заменён подшипник двигателя вытяжки, проверена тяга.</i>",
+            reply_markup=cancel_kb(),
+        )
 
 
 @router.message(ExecutorFlow.done_comment, F.text)
@@ -361,12 +371,21 @@ async def done_comment(message: types.Message, state: FSMContext, user: Optional
     if len(message.text.strip()) < 3:
         await message.answer("Опишите выполненную работу подробнее.")
         return
+    data = await state.get_data()
     await state.update_data(done_comment=message.text.strip())
     await state.set_state(ExecutorFlow.done_photo)
-    await message.answer(
-        "Шаг 2 из 4. Прикрепите <b>фото результата</b> — это обязательно.\n"
-        "Можно отправить несколько снимков, затем напишите «готово»."
-    )
+
+    if data.get("fixed_payment"):
+        await message.answer(
+            "Шаг 2 из 2. Приложите <b>фото</b>, если нужно — это не обязательно.\n"
+            "Можно отправить несколько снимков. Когда закончите, напишите "
+            "<b>готово</b>, а если фото не требуется — <b>пропустить</b>."
+        )
+    else:
+        await message.answer(
+            "Шаг 2 из 4. Прикрепите <b>фото результата</b> — это обязательно.\n"
+            "Можно отправить несколько снимков, затем напишите «готово»."
+        )
 
 
 @router.message(ExecutorFlow.done_photo, F.photo | F.video)
@@ -387,16 +406,36 @@ async def done_photo(message: types.Message, state: FSMContext) -> None:
 
 @router.message(ExecutorFlow.done_photo, F.text)
 async def done_photo_text(
-    message: types.Message, state: FSMContext, user: Optional[User]
+    message: types.Message,
+    state: FSMContext,
+    session: AsyncSession,
+    user: Optional[User],
+    bot: Bot,
 ) -> None:
     if message.text == BTN_CANCEL:
         await state.clear()
         await message.answer(texts.CANCELLED, reply_markup=main_menu(user))
         return
     data = await state.get_data()
-    if message.text.strip().lower() not in ("готово", "done", "ок", "ok"):
-        await message.answer("Отправьте фото результата или напишите «готово».")
+    fixed = bool(data.get("fixed_payment"))
+    answer = message.text.strip().lower()
+    done_words = ("готово", "done", "ок", "ok")
+    skip_words = ("пропустить", "без фото", "нет", "skip")
+
+    if answer not in done_words + (skip_words if fixed else ()):
+        if fixed:
+            await message.answer(
+                "Приложите фото или напишите «готово» / «пропустить»."
+            )
+        else:
+            await message.answer("Отправьте фото результата или напишите «готово».")
         return
+
+    if fixed:
+        # стоимость не спрашиваем — работа по фиксированной месячной оплате
+        await _finalize_done(message, state, session, user, bot, cost_exempt=True)
+        return
+
     if not data.get("done_media"):
         await message.answer(
             "⚠️ Фото результата обязательно. Отправьте хотя бы один снимок."
@@ -445,16 +484,44 @@ async def done_material_cost(
     if amount is None:
         await message.answer("Введите сумму числом, например: 120 или 120.75")
         return
+    await _finalize_done(message, state, session, user, bot, material_cost=amount)
 
+
+async def _finalize_done(
+    message: types.Message,
+    state: FSMContext,
+    session: AsyncSession,
+    user: User,
+    bot: Bot,
+    material_cost: Optional[float] = None,
+    cost_exempt: bool = False,
+) -> None:
+    """Общий финал для обоих сценариев: с указанием стоимости и без него."""
     data = await state.get_data()
     request = await load_request(session, data["request_id"])
     old = request.status
+
     request.executor_comment = data.get("done_comment")
-    request.work_cost = data.get("work_cost", 0)
-    request.material_cost = amount
     request.done_at = utcnow()
     request.status = Status.DONE
     request.return_reason = None
+    request.cost_exempt = cost_exempt
+
+    if cost_exempt:
+        # работа входит в фиксированную месячную оплату — суммы не заводим
+        request.work_cost = None
+        request.material_cost = None
+    else:
+        request.work_cost = data.get("work_cost", 0)
+        request.material_cost = material_cost or 0
+        session.add(
+            Cost(request_id=request.id, kind="work",
+                 amount=request.work_cost, added_by_id=user.id)
+        )
+        session.add(
+            Cost(request_id=request.id, kind="material",
+                 amount=request.material_cost, added_by_id=user.id)
+        )
 
     for item in data.get("done_media", []):
         session.add(
@@ -467,24 +534,32 @@ async def done_material_cost(
                 uploaded_by_id=user.id,
             )
         )
-    session.add(Cost(request_id=request.id, kind="work",
-                     amount=request.work_cost, added_by_id=user.id))
-    session.add(Cost(request_id=request.id, kind="material",
-                     amount=request.material_cost, added_by_id=user.id))
-    await history.log(
-        session, request, "done", user=user, old_status=old, new_status=Status.DONE,
-        details=(
+
+    details = (
+        "Работа по фиксированной месячной оплате — стоимость по заявке не считается"
+        if cost_exempt
+        else (
             f"Работы: {fmt_money(request.work_cost)}, "
             f"материалы: {fmt_money(request.material_cost)}"
-        ),
+        )
+    )
+    await history.log(
+        session, request, "done", user=user, old_status=old, new_status=Status.DONE,
+        details=details,
     )
     await session.commit()
     await session.refresh(request, ["attachments"])
     await state.clear()
 
+    summary = (
+        "Стоимость по этой заявке не считается — работа входит в вашу "
+        "фиксированную ежемесячную оплату."
+        if cost_exempt
+        else f"Стоимость: {fmt_money(request.total_cost)}"
+    )
     await message.answer(
         f"✅ Заявка <b>{esc(request.number)}</b> отмечена как выполненная.\n"
-        f"Стоимость: {fmt_money(request.total_cost)}\n\n"
+        f"{summary}\n\n"
         "Заявка отправлена инициатору на проверку. Закрывает заявку инициатор или менеджер.",
         reply_markup=main_menu(user),
     )

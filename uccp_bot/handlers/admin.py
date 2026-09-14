@@ -265,6 +265,13 @@ async def cb_user_card(
         f"Точка: {esc(outlet.name) if outlet else '—'}",
         f"Активировал бота: {'да' if target.tg_id else 'нет ⚠️'}",
     ]
+    if target.role_code == RoleCode.EXECUTOR:
+        lines.append(f"💰 Оплата: <b>{target.payment_title}</b>")
+        if target.fixed_payment:
+            lines.append(
+                "   <i>При закрытии заявки бот не спрашивает у него стоимость "
+                "работ и материалов, фото — по желанию.</i>"
+            )
     if target.approved_at:
         lines.append(f"Доступ выдан: {fmt_dt(target.approved_at)}")
     if target.reject_reason:
@@ -301,6 +308,14 @@ async def cb_user_card(
             kb.button(
                 text="🗂 Направления мастера",
                 callback_data=AdminCB(act="exec_card", id=target.id).pack(),
+            )
+            kb.button(
+                text=(
+                    "💰 Оплата: перевести на заявки"
+                    if target.fixed_payment
+                    else "💰 Оплата: фиксированная за месяц"
+                ),
+                callback_data=AdminCB(act="user_payment", id=target.id).pack(),
             )
         kb.button(text="📱 Телефон", callback_data=AdminCB(act="user_phone", id=target.id).pack())
         if target.status == UserStatus.ACTIVE:
@@ -355,6 +370,44 @@ async def cb_user_status(
                 messages.get(target.status, ""),
                 reply_markup=main_menu(target),
             )
+        except Exception:
+            pass
+    await cb_user_card(call, AdminCB(act="user_card", id=target.id), session, user)
+
+
+@router.callback_query(AdminCB.filter(F.act == "user_payment"))
+async def cb_user_payment(
+    call: types.CallbackQuery,
+    callback_data: AdminCB,
+    session: AsyncSession,
+    user: Optional[User],
+    bot: Bot,
+) -> None:
+    """Фиксированная месячная оплата: у мастера не спрашиваем стоимость."""
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    target = await session.get(User, callback_data.id)
+    target.fixed_payment = not target.fixed_payment
+    await session.commit()
+    await call.answer(
+        "Фиксированная месячная оплата: стоимость по заявкам больше не спрашиваем."
+        if target.fixed_payment
+        else "Оплата по заявкам: бот снова будет спрашивать стоимость работ и материалов.",
+        show_alert=True,
+    )
+    if target.tg_id:
+        note = (
+            "ℹ️ Условия оплаты обновлены: <b>фиксированная ежемесячная</b>.\n"
+            "При завершении заявки укажите только выполненные работы и, "
+            "при необходимости, фото — стоимость вводить не нужно."
+            if target.fixed_payment
+            else "ℹ️ Условия оплаты обновлены: <b>оплата по каждой заявке</b>.\n"
+            "При завершении заявки снова потребуется указать стоимость работ "
+            "и материалов."
+        )
+        try:
+            await bot.send_message(target.tg_id, note)
         except Exception:
             pass
     await cb_user_card(call, AdminCB(act="user_card", id=target.id), session, user)

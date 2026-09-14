@@ -23,6 +23,8 @@ COLUMNS = [
     ("users", "approved_at", "DATETIME"),
     ("users", "approved_by_id", "INTEGER"),
     ("users", "reject_reason", "TEXT"),
+    ("users", "fixed_payment", "BOOLEAN DEFAULT 0"),
+    ("requests", "cost_exempt", "BOOLEAN DEFAULT 0"),
 ]
 
 

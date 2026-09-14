@@ -89,7 +89,13 @@ def render_card(
             lines.append(f"❌ Причина отклонения: {esc(request.reject_reason)}")
         if request.return_reason:
             lines.append(f"🔄 Причина возврата: {esc(request.return_reason)}")
-        if request.work_cost is not None or request.material_cost is not None:
+        if request.cost_exempt:
+            lines += [
+                "",
+                "💰 Оплата: <b>фиксированная ежемесячная</b> — отдельной суммы "
+                "по этой заявке нет",
+            ]
+        elif request.work_cost is not None or request.material_cost is not None:
             lines += [
                 "",
                 f"💰 Работы: {fmt_money(request.work_cost)}",

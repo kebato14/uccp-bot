@@ -188,9 +188,9 @@ def build_month_payload(
                 Status.title(req.status),
                 fmt_dt(req.done_at),
                 fmt_dt(req.closed_at),
-                _money(req.work_cost),
-                _money(req.material_cost),
-                _money(req.total_cost),
+                "фикс. оплата" if req.cost_exempt else _money(req.work_cost),
+                "фикс. оплата" if req.cost_exempt else _money(req.material_cost),
+                "фикс. оплата" if req.cost_exempt else _money(req.total_cost),
                 "да" if req.is_overdue else "нет",
             ]
         )

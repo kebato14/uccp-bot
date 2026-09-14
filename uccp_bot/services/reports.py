@@ -107,6 +107,7 @@ class ReportData:
     awaiting: int = 0
     total_cost: float = 0.0
     avg_cost: float = 0.0
+    fixed_payment: int = 0     # заявки по фиксированной месячной оплате
     by_brand: Dict[str, Tuple[int, float]] = field(default_factory=dict)
     by_outlet: Dict[str, Tuple[int, float]] = field(default_factory=dict)
     by_executor: Dict[str, Tuple[int, float]] = field(default_factory=dict)
@@ -139,6 +140,8 @@ async def build_report(session: AsyncSession, f: ReportFilters) -> ReportData:
         data.total_cost += cost
         if cost > 0:
             paid += 1
+        if req.cost_exempt:
+            data.fixed_payment += 1
 
         _bump(data.by_brand, req.brand.name, cost)
         _bump(data.by_outlet, req.outlet.name, cost)
@@ -178,6 +181,11 @@ def render_report(data: ReportData, f: ReportFilters) -> str:
         f"Общая стоимость: <b>{fmt_money(data.total_cost)}</b>",
         f"Средняя стоимость заявки: <b>{fmt_money(data.avg_cost)}</b>",
     ]
+    if data.fixed_payment:
+        lines.append(
+            f"Из них по фиксированной месячной оплате: <b>{data.fixed_payment}</b> "
+            "(в сумму расходов не входят)"
+        )
     lines += _section("По брендам", data.by_brand)
     lines += _section("По точкам", data.by_outlet)
     lines += _section("По исполнителям", data.by_executor)
@@ -307,6 +315,7 @@ def render_combined_report(
             f"• Просрочено: {tech.overdue}",
             f"• Отменено / отклонено: {tech.cancelled}",
             f"• Расходы: <b>{fmt_money(tech.total_cost)}</b>",
+            f"• По фиксированной оплате (без суммы): {tech.fixed_payment}",
             "",
             "🗂 <b>Организационные заявки УЦЦП</b>",
             f"• Всего: <b>{org_data.total}</b>",

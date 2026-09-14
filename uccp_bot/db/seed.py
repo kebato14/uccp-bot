@@ -59,6 +59,7 @@ CATEGORIES = [
     ("plumbing", "Сантехника", "🚰", False, 10),
     ("electric", "Электрика", "⚡", False, 20),
     ("equipment", "Обслуживание оборудования", "🔧", False, 30),
+    ("coffee", "Кофемашины", "☕️", False, 35),
     ("ventilation", "Вентиляция", "🌬", False, 40),
     ("it", "IT", "💻", False, 50),
     ("repair", "Ремонт / мебель", "🪑", False, 60),
