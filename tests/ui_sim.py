@@ -32,8 +32,8 @@ from sqlalchemy import select  # noqa: E402
 from uccp_bot.bot import build_dispatcher  # noqa: E402
 from uccp_bot.db.base import SessionMaker, init_db  # noqa: E402
 from uccp_bot.db.models import (
-    Brand, Category, OrgRequest, OrgStatus, Outlet, Request, RoleCode, Status,
-    User, UserStatus,
+    Brand, Category, OrgRequest, OrgStatus, OrgType, Outlet, Request, RoleCode,
+    Status, User, UserStatus,
 )
 from uccp_bot.services import routing  # noqa: E402
 from uccp_bot.db.seed import seed  # noqa: E402
@@ -607,60 +607,149 @@ async def main() -> None:
     check("фиксированная ежемесячная" in OUT.texts_for(5002).lower(),
           "В карточке заявки видно, что суммы нет")
 
-    # ---------------- организационные заявки УЦЦП ----------------
-    print("\n=== Модуль организационных заявок УЦЦП ===")
+    # ---------------- заявка в УЦЦП ----------------
+    print("\n=== Канал «Заявка в УЦЦП» ===")
+    uccp = Client(bot, dp, 5007, "Сотрудник УЦЦП", username="uccp1")
     OUT.clear()
-    await manager.send("🗂 Заявки УЦЦП")
-    check("Организационные заявки УЦЦП" in OUT.texts_for(5002), "Раздел открывается")
-    await manager.click("Новая заявка УЦЦП")
-    await manager.click("Moose Café")
-    await manager.click("Moose Opera")
-    check("Опишите" in OUT.texts_for(5002), "Бот просит описание задачи")
-    await manager.send("Подготовить документы по продлению аренды до конца недели.")
-    await manager.click("Средний")
+    await uccp.send("/start")
+    await uccp.send("Дилором")
+    await uccp.send("Назарова")
+    await uccp.send("Специалист УЦЦП")
+    await uccp.click("Оба бренда")
+    await admin.send("⚙️ Администрирование")
+    await admin.click("Заявки на регистрацию")
+    await admin.click("Назарова")
+    await admin.click("Подтвердить")
+    await admin.click("Сотрудник УЦЦП")
+    async with SessionMaker() as session:
+        u = await session.scalar(select(User).where(User.tg_id == 5007))
+        check(u.role_code == RoleCode.UCCP_STAFF, "Роль «Сотрудник УЦЦП» назначена")
+
+    # мастер не может подать обращение в УЦЦП
+    OUT.clear()
+    await electrician.send("🗂 Заявка в УЦЦП")
+    check(not electrician.has_button("Новая заявка в УЦЦП"),
+          "Мастер обращение в УЦЦП не создаёт")
+
+    # управляющий точки подаёт заявку на инвентарь
+    OUT.clear()
+    await manager.send("🗂 Заявка в УЦЦП")
+    check(manager.has_button("Новая заявка в УЦЦП"), "Управляющему доступна подача")
+    await manager.click("Новая заявка в УЦЦП")
+    profile = OUT.texts_for(5002)
+    check("Рахимова" in profile and "Moose Opera" in profile,
+          "Профиль подставлен автоматически: Ф.И.О., бренд, точка")
+    check("Что вы хотите направить в УЦЦП" in profile, "Бот спрашивает тип обращения")
+
+    await manager.click("Заявка на инвентарь")
+    check("Что необходимо" in OUT.texts_for(5002), "Шаг 1: что необходимо")
+    await manager.send("Стаканы 400 мл с крышками")
+    check("количество" in OUT.texts_for(5002).lower(), "Шаг 2: количество")
+    await manager.send("200 шт")
+    check("обоснование" in OUT.texts_for(5002).lower(), "Шаг 3: причина/обоснование")
+    await manager.send("Остаток на два дня, продажи выросли")
     await manager.click("Завтра")
-    await manager.click("12:00")
-    check("ответственного" in OUT.texts_for(5002).lower(), "Бот просит выбрать ответственного")
-    await manager.click("Назрулло")
-    check("Проверьте организационную заявку" in OUT.texts_for(5002), "Показан предпросмотр")
-    check("Рахимова" in OUT.texts_for(5002), "Автор подставлен из профиля автоматически")
-    await manager.click("Отправить")
-    check("создана" in OUT.texts_for(5002), "Заявка УЦЦП создана")
-    check("Новая организационная заявка" in OUT.texts_for(5003),
-          "Ответственный получил уведомление")
+    await manager.click("14:00")
+    check("не обязательно" in OUT.texts_for(5002), "Шаг 5: фото по желанию")
+    await manager.send_photo()
+    await manager.click("Готово")
+
+    card = OUT.texts_for(5002)
+    for field in ("ЗАЯВКА В УЦЦП", "Бренд:", "Точка:", "Автор:", "Должность:",
+                  "Тип:", "Запрос:", "Количество:", "Срок:", "Фото/файл:"):
+        check(field in card, f"В карточке есть «{field}»")
+    check(manager.has_button("Отправить в УЦЦП"), "Кнопка «Отправить в УЦЦП»")
+    await manager.click("Отправить в УЦЦП")
+    check("направлено в УЦЦП" in OUT.texts_for(5002), "Обращение отправлено")
+    check("Новое обращение в УЦЦП" in OUT.texts_for(5007),
+          "Обращение пришло сотруднику УЦЦП, а не управляющему")
+    check("Новое обращение" not in OUT.texts_for(5003),
+          "Мастерам обращение не приходит")
 
     async with SessionMaker() as session:
-        org_req = await session.scalar(select(OrgRequest))
-        check(org_req is not None and org_req.number.startswith("ORG-"),
-              f"Своя нумерация: {org_req.number}")
-        check(org_req.author_id is not None, "Автор сохранён")
-        org_number = org_req.number
+        o = await session.scalar(select(OrgRequest))
+        check(o.number.startswith("ORG-"), f"Своя нумерация: {o.number}")
+        check(o.request_type == OrgType.INVENTORY and o.quantity == "200 шт",
+              "Тип и количество сохранены")
+        check(o.author_position is not None, "Должность автора зафиксирована")
+        org_number = o.number
 
-    # ответственный выполняет
-    await electrician.click("Взять в работу")
-    async with SessionMaker() as session:
-        org_req = await session.scalar(select(OrgRequest))
-        check(org_req.status == OrgStatus.IN_PROGRESS, "Статус «В работе»")
-
-    await electrician.click("Выполнено")
-    await electrician.send("Документы собраны и переданы в офис.")
-    await electrician.send("0")
-    async with SessionMaker() as session:
-        org_req = await session.scalar(select(OrgRequest))
-        check(org_req.status == OrgStatus.DONE, "Статус «Выполнена», но не закрыта")
-    check("проверьте результат" in OUT.texts_for(5002).lower(),
-          "Автору пришёл запрос на проверку")
-
+    # УЦЦП запрашивает уточнение
+    print("\n--- уточнение ---")
     OUT.clear()
-    await manager.send("🗂 Заявки УЦЦП")
-    await manager.click("Мои заявки")
-    await manager.click(org_number)
+    await uccp.send("🗂 Заявка в УЦЦП")
+    await uccp.click("Новые обращения")
+    await uccp.click(org_number)
+    await uccp.click("Запросить уточнение")
+    await uccp.send("Уточните, крышки какого диаметра и на какую дату нужны.")
+    check("крышки какого диаметра" in OUT.texts_for(5002),
+          "Автор получил конкретный вопрос, каких данных не хватает")
+    async with SessionMaker() as session:
+        o = await session.scalar(select(OrgRequest))
+        check(o.status == OrgStatus.CLARIFY, "Статус «Ожидает уточнения»")
+
+    await manager.click("Дополнить данные")
+    await manager.send("Крышки 90 мм, нужно к пятнице.")
+    async with SessionMaker() as session:
+        o = await session.scalar(select(OrgRequest))
+        check(o.status == OrgStatus.NEW and o.clarify_answer,
+              "Дополненное обращение вернулось в УЦЦП")
+
+    # приём → назначение → работа → выполнение → закрытие
+    print("\n--- обработка в УЦЦП ---")
+    OUT.clear()
+    await uccp.send("🗂 Заявка в УЦЦП")
+    await uccp.click("Новые обращения")
+    await uccp.click(org_number)
+    await uccp.click("Принять в УЦЦП")
+    async with SessionMaker() as session:
+        o = await session.scalar(select(OrgRequest))
+        check(o.status == OrgStatus.ACCEPTED, "Статус «Принята УЦЦП»")
+    check("приняло ваше обращение" in OUT.texts_for(5002), "Автор уведомлён о приёме")
+
+    await uccp.click("Назначить ответственного")
+    check(not uccp.has_button("Назрулло"), "В списке ответственных нет мастеров")
+    await uccp.click("Назарова")
+    async with SessionMaker() as session:
+        o = await session.scalar(select(OrgRequest))
+        check(o.status == OrgStatus.ASSIGNED, "Статус «Назначен ответственный»")
+
+    await uccp.click("Взять в работу")
+    async with SessionMaker() as session:
+        o = await session.scalar(select(OrgRequest))
+        check(o.status == OrgStatus.IN_PROGRESS, "Статус «В работе»")
+
+    await uccp.click("Выполнено")
+    await uccp.send("Стаканы и крышки отгружены со склада, доставка в четверг.")
+    async with SessionMaker() as session:
+        o = await session.scalar(select(OrgRequest))
+        check(o.status == OrgStatus.DONE, "Статус «Выполнена», ждёт автора")
+    check("выполнило ваше обращение" in OUT.texts_for(5002), "Автор получил результат")
+
     await manager.click("Подтвердить и закрыть")
     async with SessionMaker() as session:
-        org_req = await session.scalar(select(OrgRequest))
-        check(org_req.status == OrgStatus.CLOSED, "Автор закрыл заявку УЦЦП")
+        o = await session.scalar(select(OrgRequest))
+        check(o.status == OrgStatus.CLOSED, "Автор закрыл обращение")
 
-    # статистика не смешивается
+    # остальные типы обращений
+    print("\n--- другие типы ---")
+    OUT.clear()
+    await manager.send("🗂 Заявка в УЦЦП")
+    await manager.click("Новая заявка в УЦЦП")
+    await manager.click("Проблема")
+    check("Опишите" in OUT.texts_for(5002), "Тип «Проблема»: сразу описание")
+    await manager.send("Поставщик второй раз привозит не тот сироп.")
+    await manager.click("Завтра")
+    await manager.click("12:00")
+    await manager.click("Пропустить")
+    await manager.click("Отправить в УЦЦП")
+    async with SessionMaker() as session:
+        cnt = len((await session.scalars(select(OrgRequest))).all())
+        last = (await session.scalars(select(OrgRequest).order_by(OrgRequest.id.desc()))).first()
+        check(cnt == 2 and last.request_type == OrgType.PROBLEM,
+              "Обращение типа «Проблема» создано без вопросов о количестве")
+
+    # статистика раздельная
     print("\n=== Отчёты: модули раздельно ===")
     OUT.clear()
     await manager.send("📊 Отчёты")
@@ -668,8 +757,8 @@ async def main() -> None:
     await manager.click("Организационные УЦЦП")
     await manager.click("Сегодня")
     org_report = OUT.texts_for(5002)
-    check("Организационные заявки УЦЦП" in org_report, "Отчёт по модулю УЦЦП")
-    check("REQ-" not in org_report, "В отчёте УЦЦП нет ремонтных заявок")
+    check("Заявки в УЦЦП" in org_report, "Отчёт по обращениям в УЦЦП")
+    check("REQ-" not in org_report, "В отчёте УЦЦП нет заявок мастерам")
 
     OUT.clear()
     await admin.send("📊 Отчёты")
@@ -677,7 +766,7 @@ async def main() -> None:
     await admin.click("Сводный отчёт")
     await admin.click("Сегодня")
     combined = OUT.texts_for(5001)
-    check("Технические и ремонтные заявки" in combined and "Организационные" in combined,
+    check("Технические и ремонтные заявки" in combined and "Заявки в УЦЦП" in combined,
           "Сводный отчёт показывает оба модуля раздельно")
     await admin.click("Скачать Excel")
     check("Каждый модуль — на своём листе" in OUT.texts_for(5001),

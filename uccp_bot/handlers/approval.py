@@ -209,7 +209,8 @@ async def cb_role(
     await session.commit()
     await call.answer()
 
-    if role == RoleCode.ADMIN:
+    # администратор системы и сотрудник УЦЦП не привязаны к бренду и точке
+    if role in (RoleCode.ADMIN, RoleCode.UCCP_STAFF):
         await _finish(call, session, user, bot, target)
         return
     if role == RoleCode.EXECUTOR:
@@ -451,6 +452,7 @@ async def _finish(
         RoleCode.OPS_DIRECTOR: f"Бренд: {brand.name if brand else '—'}",
         RoleCode.EXECUTOR: "Направления: " + (", ".join(names) if names else "—")
         + (f"\nБренд: {brand.name}" if brand else "\nБренды и объекты: все"),
+        RoleCode.UCCP_STAFF: "Доступ: все обращения точек в УЦЦП",
         RoleCode.ADMIN: "Доступ: полный",
     }
     scope = scope_lines.get(role, "")

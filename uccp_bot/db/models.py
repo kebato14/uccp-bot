@@ -41,14 +41,16 @@ class RoleCode:
     OUTLET_ADMIN = "outlet_admin"    # Администратор точки — все заявки своей точки
     OPS_DIRECTOR = "ops"             # Операционный директор — все точки своего бренда
     EXECUTOR = "executor"            # Мастер / исполнитель — только назначенные ему
+    UCCP_STAFF = "uccp_staff"        # Сотрудник УЦЦП — обрабатывает обращения точек
     ADMIN = "admin"                  # Администратор системы — полный доступ
 
-    ALL = (STAFF, OUTLET_ADMIN, OPS_DIRECTOR, EXECUTOR, ADMIN)
+    ALL = (STAFF, OUTLET_ADMIN, OPS_DIRECTOR, EXECUTOR, UCCP_STAFF, ADMIN)
     TITLES = {
         STAFF: "Сотрудник / менеджер точки",
         OUTLET_ADMIN: "Администратор точки",
         OPS_DIRECTOR: "Операционный директор",
         EXECUTOR: "Мастер / исполнитель",
+        UCCP_STAFF: "Сотрудник УЦЦП",
         ADMIN: "Администратор системы",
     }
     DESCRIPTIONS = {
@@ -56,6 +58,7 @@ class RoleCode:
         OUTLET_ADMIN: "видит все заявки своей торговой точки",
         OPS_DIRECTOR: "видит все заявки своего бренда",
         EXECUTOR: "видит только назначенные ему заявки",
+        UCCP_STAFF: "принимает и обрабатывает обращения точек в УЦЦП",
         ADMIN: "полный доступ, подтверждает регистрации",
     }
     # старые коды ролей -> новые (миграция существующей базы)
@@ -331,6 +334,7 @@ class User(Base):
             RoleCode.STAFF,
             RoleCode.OUTLET_ADMIN,
             RoleCode.OPS_DIRECTOR,
+            RoleCode.UCCP_STAFF,
             RoleCode.ADMIN,
         )
 
@@ -347,6 +351,7 @@ class User(Base):
         return self.is_approved and self.role_code in (
             RoleCode.OUTLET_ADMIN,
             RoleCode.OPS_DIRECTOR,
+            RoleCode.UCCP_STAFF,
             RoleCode.ADMIN,
         )
 
@@ -532,24 +537,60 @@ class RequestStatusHistory(Base):
     user: Mapped[Optional[User]] = relationship()
 
 
-class OrgStatus:
-    """Статусы организационных заявок УЦЦП (отдельно от ремонтных)."""
+class OrgType:
+    """Что точка направляет в УЦЦП."""
 
-    NEW = "new"                  # Новая
+    INVENTORY = "inventory"   # заявка на инвентарь
+    PROBLEM = "problem"       # проблема / запрос на решение
+    TASK = "task"             # задача / организационный запрос
+
+    ALL = (INVENTORY, PROBLEM, TASK)
+    TITLES = {
+        INVENTORY: "📦 Заявка на инвентарь",
+        PROBLEM: "🛠 Проблема / запрос на решение",
+        TASK: "📋 Задача / организационный запрос",
+    }
+    HINTS = {
+        INVENTORY: "что необходимо, сколько и зачем",
+        PROBLEM: "вопрос в зоне ответственности УЦЦП",
+        TASK: "что нужно сделать со стороны УЦЦП",
+    }
+
+    @classmethod
+    def title(cls, code: str) -> str:
+        return cls.TITLES.get(code, code)
+
+
+class OrgStatus:
+    """Обработка обращения на стороне УЦЦП.
+
+    Новая → Принята УЦЦП → Назначен ответственный → В работе → Выполнена → Закрыта.
+    Отдельно: возврат на уточнение, отклонение, отмена автором.
+    """
+
+    NEW = "new"                  # Новая — ждёт рассмотрения в УЦЦП
+    ACCEPTED = "accepted"        # Принята УЦЦП
+    ASSIGNED = "assigned"        # Назначен ответственный
     IN_PROGRESS = "in_progress"  # В работе
     DONE = "done"                # Выполнена, ждёт подтверждения автора
     CLOSED = "closed"            # Закрыта
-    CANCELLED = "cancelled"      # Отменена
+    CLARIFY = "clarify"          # Возвращена на уточнение автору
+    REJECTED = "rejected"        # Отклонена УЦЦП
+    CANCELLED = "cancelled"      # Отменена автором
 
     TITLES = {
         NEW: "🆕 Новая",
+        ACCEPTED: "👍 Принята УЦЦП",
+        ASSIGNED: "🎯 Назначен ответственный",
         IN_PROGRESS: "🔧 В работе",
         DONE: "✅ Выполнена",
         CLOSED: "🔒 Закрыта",
+        CLARIFY: "❓ Ожидает уточнения от автора",
+        REJECTED: "❌ Отклонена",
         CANCELLED: "🚫 Отменена",
     }
-    OPEN = (NEW, IN_PROGRESS, DONE)
-    FINAL = (CLOSED, CANCELLED)
+    OPEN = (NEW, ACCEPTED, ASSIGNED, IN_PROGRESS, DONE, CLARIFY)
+    FINAL = (CLOSED, REJECTED, CANCELLED)
 
     @classmethod
     def title(cls, code: str) -> str:
@@ -577,22 +618,34 @@ class OrgRequest(Base):
     brand_id: Mapped[Optional[int]] = mapped_column(ForeignKey("brands.id"), nullable=True)
     object_text: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
+    # что именно направляется в УЦЦП
+    request_type: Mapped[str] = mapped_column(String(16), default=OrgType.TASK)
     description: Mapped[str] = mapped_column(Text)
+    quantity: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)   # для инвентаря
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)            # обоснование
     due_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
 
     author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # должность автора на момент подачи — чтобы карточка не менялась задним числом
+    author_position: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     assignee_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    accepted_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     status: Mapped[str] = mapped_column(String(32), default=OrgStatus.NEW)
     priority: Mapped[str] = mapped_column(String(16), default=Priority.MEDIUM)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
+    accepted_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    assigned_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
     done_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
 
     result_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     author_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    clarify_question: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    clarify_answer: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     cost: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
 
     is_overdue: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -600,8 +653,12 @@ class OrgRequest(Base):
 
     author: Mapped["User"] = relationship(foreign_keys=[author_id])
     assignee: Mapped[Optional["User"]] = relationship(foreign_keys=[assignee_id])
+    accepted_by: Mapped[Optional["User"]] = relationship(foreign_keys=[accepted_by_id])
     outlet: Mapped[Optional[Outlet]] = relationship()
     brand: Mapped[Optional[Brand]] = relationship()
+    attachments: Mapped[List["OrgAttachment"]] = relationship(
+        back_populates="request", cascade="all, delete-orphan"
+    )
     history: Mapped[List["OrgRequestHistory"]] = relationship(
         back_populates="request", cascade="all, delete-orphan"
     )
@@ -610,6 +667,10 @@ class OrgRequest(Base):
         Index("ix_org_requests_status", "status"),
         Index("ix_org_requests_created", "created_at"),
     )
+
+    @property
+    def type_title(self) -> str:
+        return OrgType.title(self.request_type)
 
     @property
     def object_name(self) -> str:
@@ -631,6 +692,26 @@ class OrgRequest(Base):
     @property
     def total_cost(self) -> float:
         return float(self.cost or 0)
+
+
+class OrgAttachment(Base):
+    """Фото, видео и документы к обращению в УЦЦП."""
+
+    __tablename__ = "org_attachments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("org_requests.id", ondelete="CASCADE")
+    )
+    file_id: Mapped[str] = mapped_column(String(256))
+    file_unique_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    media_type: Mapped[str] = mapped_column(String(16), default="photo")
+    file_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    stage: Mapped[str] = mapped_column(String(16), default="request")  # request | result
+    uploaded_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
+
+    request: Mapped[OrgRequest] = relationship(back_populates="attachments")
 
 
 class OrgRequestHistory(Base):

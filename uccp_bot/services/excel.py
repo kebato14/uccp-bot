@@ -97,9 +97,11 @@ def export_requests(requests: List[Request], title: str = "Заявки") -> str
 ORG_HEADERS = [
     ("№ заявки", 18),
     ("Дата создания", 18),
-    ("Объект", 26),
+    ("Точка / объект", 26),
     ("Бренд", 16),
-    ("Задача", 50),
+    ("Тип обращения", 26),
+    ("Запрос", 50),
+    ("Количество", 16),
     ("Автор", 22),
     ("Ответственный", 22),
     ("Приоритет", 14),
@@ -132,7 +134,9 @@ def _write_org_sheet(ws, requests) -> None:
             fmt_dt(req.created_at),
             req.object_name,
             req.brand.name if req.brand else "",
+            req.type_title,
             req.description,
+            req.quantity or "",
             req.author.full_name if req.author else "",
             req.assignee.full_name if req.assignee else "не назначен",
             req.priority_title,
@@ -146,7 +150,7 @@ def _write_org_sheet(ws, requests) -> None:
         ]
         for col, value in enumerate(values, start=1):
             cell = ws.cell(row=row_idx, column=col, value=value)
-            if col in (5, 14):
+            if col in (7, 16):
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
 
 

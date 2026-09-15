@@ -210,6 +210,8 @@ class OrgReportData:
     by_assignee: Dict[str, Tuple[int, float]] = field(default_factory=dict)
     by_author: Dict[str, Tuple[int, float]] = field(default_factory=dict)
     by_brand: Dict[str, Tuple[int, float]] = field(default_factory=dict)
+    by_type: Dict[str, Tuple[int, float]] = field(default_factory=dict)
+    waiting_clarify: int = 0
 
 
 def apply_org_filters(stmt, f: ReportFilters):
@@ -257,10 +259,12 @@ async def build_org_report(session: AsyncSession, f: ReportFilters) -> OrgReport
         cost = req.total_cost
         if req.status == OrgStatus.CLOSED:
             data.closed += 1
-        elif req.status == OrgStatus.CANCELLED:
+        elif req.status in (OrgStatus.CANCELLED, OrgStatus.REJECTED):
             data.cancelled += 1
         else:
             data.in_work += 1
+        if req.status == OrgStatus.CLARIFY:
+            data.waiting_clarify += 1
         if req.is_overdue and req.status in OrgStatus.OPEN:
             data.overdue += 1
         data.total_cost += cost
@@ -273,27 +277,30 @@ async def build_org_report(session: AsyncSession, f: ReportFilters) -> OrgReport
         )
         _bump(data.by_author, req.author.full_name if req.author else "—", cost)
         _bump(data.by_brand, req.brand.name if req.brand else "вне брендов", cost)
+        _bump(data.by_type, req.type_title, cost)
 
     return data
 
 
 def render_org_report(data: OrgReportData, f: ReportFilters) -> str:
     lines = [
-        f"🗂 <b>Организационные заявки УЦЦП {esc(f.describe())}</b>",
+        f"🗂 <b>Заявки в УЦЦП {esc(f.describe())}</b>",
         "",
-        f"Всего заявок: <b>{data.total}</b>",
+        f"Всего обращений: <b>{data.total}</b>",
         f"Закрыто: <b>{data.closed}</b>",
         f"В работе: <b>{data.in_work}</b>",
+        f"Ожидают уточнения от автора: <b>{data.waiting_clarify}</b>",
         f"Просрочено: <b>{data.overdue}</b>",
-        f"Отменено: <b>{data.cancelled}</b>",
-        "",
-        f"Затраты: <b>{fmt_money(data.total_cost)}</b>",
+        f"Отменено / отклонено: <b>{data.cancelled}</b>",
     ]
-    lines += _section("По объектам", data.by_object)
-    lines += _section("По ответственным", data.by_assignee)
+    if data.total_cost:
+        lines += ["", f"Затраты: <b>{fmt_money(data.total_cost)}</b>"]
+    lines += _section("По типам обращений", data.by_type)
+    lines += _section("По точкам", data.by_object)
+    lines += _section("По ответственным УЦЦП", data.by_assignee)
     lines += _section("По авторам", data.by_author)
     if data.total == 0:
-        lines.append("\nЗа выбранный период организационных заявок нет.")
+        lines.append("\nЗа выбранный период обращений в УЦЦП нет.")
     return "\n".join(lines)
 
 
@@ -317,7 +324,7 @@ def render_combined_report(
             f"• Расходы: <b>{fmt_money(tech.total_cost)}</b>",
             f"• По фиксированной оплате (без суммы): {tech.fixed_payment}",
             "",
-            "🗂 <b>Организационные заявки УЦЦП</b>",
+            "🗂 <b>Заявки в УЦЦП (обращения точек)</b>",
             f"• Всего: <b>{org_data.total}</b>",
             f"• Закрыто: {org_data.closed}",
             f"• В работе: {org_data.in_work}",

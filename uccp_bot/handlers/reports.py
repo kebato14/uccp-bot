@@ -111,7 +111,7 @@ def _filters_from_state(data: Dict[str, Any]) -> reports.ReportFilters:
 
 def _apply_scope(filters: reports.ReportFilters, user: Optional[User]) -> reports.ReportFilters:
     """Отчёт всегда ограничен областью доступа роли."""
-    if user is None or user.is_admin:
+    if user is None or user.is_admin or user.role_code == RoleCode.UCCP_STAFF:
         return filters
     if user.is_ops_director:
         filters.brand_id = user.brand_id

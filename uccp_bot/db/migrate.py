@@ -25,6 +25,16 @@ COLUMNS = [
     ("users", "reject_reason", "TEXT"),
     ("users", "fixed_payment", "BOOLEAN DEFAULT 0"),
     ("requests", "cost_exempt", "BOOLEAN DEFAULT 0"),
+    ("org_requests", "request_type", "VARCHAR(16) DEFAULT 'task'"),
+    ("org_requests", "quantity", "VARCHAR(120)"),
+    ("org_requests", "reason", "TEXT"),
+    ("org_requests", "author_position", "VARCHAR(200)"),
+    ("org_requests", "accepted_by_id", "INTEGER"),
+    ("org_requests", "accepted_at", "DATETIME"),
+    ("org_requests", "assigned_at", "DATETIME"),
+    ("org_requests", "clarify_question", "TEXT"),
+    ("org_requests", "clarify_answer", "TEXT"),
+    ("org_requests", "reject_reason", "TEXT"),
 ]
 
 

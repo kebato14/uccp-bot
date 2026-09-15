@@ -27,25 +27,26 @@ class NewRequest(StatesGroup):
 
 
 class NewOrgRequest(StatesGroup):
-    """Мастер создания организационной заявки УЦЦП."""
+    """Обращение точки в УЦЦП. Профиль автора подставляется автоматически."""
 
-    obj = State()
-    obj_outlet = State()
-    obj_custom = State()
+    request_type = State()
     description = State()
-    priority = State()
+    quantity = State()
+    reason = State()
     due_date = State()
     due_time = State()
-    assignee = State()
+    media = State()
     preview = State()
 
 
 class OrgFlow(StatesGroup):
     done_comment = State()
-    cost = State()
     comment = State()
     cancel_reason = State()
     return_reason = State()
+    clarify_question = State()   # УЦЦП спрашивает, каких данных не хватает
+    clarify_answer = State()     # автор дополняет
+    reject_reason = State()
 
 
 class ExecutorFlow(StatesGroup):

@@ -88,11 +88,13 @@ def org_worksheet_title(year: int, month: int) -> str:
 
 
 ORG_DETAIL_HEADERS = [
-    "№ заявки",
-    "Дата заявки",
-    "Объект",
+    "№ обращения",
+    "Дата",
+    "Точка / объект",
     "Бренд",
-    "Задача",
+    "Тип обращения",
+    "Запрос",
+    "Количество",
     "Автор",
     "Ответственный",
     "Приоритет",
@@ -241,7 +243,7 @@ def build_org_month_payload(requests: List, year: int, month: int) -> List[List[
     from ..db.models import OrgStatus
 
     payload: List[List[Any]] = [
-        [f"Организационные заявки УЦЦП за {month_title(year, month)}"],
+        [f"Заявки в УЦЦП за {month_title(year, month)}"],
         [f"Сформирован автоматически: {now_local().strftime('%d.%m.%Y %H:%M')}",
          f"Валюта: {config.currency}"],
         [],
@@ -266,7 +268,9 @@ def build_org_month_payload(requests: List, year: int, month: int) -> List[List[
                 fmt_dt(req.created_at),
                 req.object_name,
                 req.brand.name if req.brand else "",
+                req.type_title,
                 req.description,
+                req.quantity or "",
                 req.author.full_name if req.author else "",
                 req.assignee.full_name if req.assignee else "не назначен",
                 req.priority_title,
