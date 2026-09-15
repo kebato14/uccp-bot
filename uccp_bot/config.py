@@ -31,6 +31,7 @@ class Config:
     timezone: str = os.getenv("TIMEZONE", "Asia/Dushanbe")
     currency: str = os.getenv("CURRENCY", "сомони")
     overdue_check_minutes: int = int(os.getenv("OVERDUE_CHECK_MINUTES", "15"))
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
     bootstrap_admin_ids: List[int] = field(
         default_factory=lambda: _int_list(os.getenv("BOOTSTRAP_ADMIN_IDS", ""))
     )

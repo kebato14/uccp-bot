@@ -7,3 +7,4 @@ python-dotenv>=1.0
 greenlet>=3.0
 gspread>=6.0
 google-auth>=2.30
+uvloop>=0.19; sys_platform != "win32"

@@ -14,8 +14,8 @@ from .config import config
 from .db.base import SessionMaker, init_db
 from .db.seed import ensure_bootstrap_admins, seed
 from .handlers import (
-    actions, admin, approval, create, fallback, groups, help as help_handlers,
-    lists, org, reports, start,
+    actions, admin, approval, create, diag, fallback, groups,
+    help as help_handlers, lists, org, reports, start,
 )
 from .middlewares.context import (
     AccessMiddleware,
@@ -25,10 +25,22 @@ from .middlewares.context import (
 from .scheduler import setup_scheduler
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.log_level.upper(), logging.INFO),
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
+# по сообщению на каждое нажатие кнопки — на сервере это лишняя нагрузка
+logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 log = logging.getLogger("uccp")
+
+
+def _use_uvloop() -> bool:
+    """uvloop ускоряет сетевые операции в 2-4 раза. Если не установлен — работаем как есть."""
+    try:
+        import uvloop
+    except ImportError:
+        return False
+    uvloop.install()
+    return True
 
 COMMANDS = [
     BotCommand(command="start", description="Начать работу / регистрация"),
@@ -36,6 +48,7 @@ COMMANDS = [
     BotCommand(command="help", description="Инструкция и помощь"),
     BotCommand(command="cancel", description="Отменить текущее действие"),
     BotCommand(command="id", description="Показать мой Telegram ID"),
+    BotCommand(command="ping", description="Скорость работы (для администратора)"),
 ]
 
 
@@ -49,7 +62,8 @@ def build_dispatcher() -> Dispatcher:
     dp.callback_query.outer_middleware(AccessMiddleware())
 
     # Личные чаты
-    private = (start.router, approval.router, help_handlers.router, create.router,
+    private = (start.router, approval.router, diag.router, help_handlers.router,
+               create.router,
                lists.router, org.router, actions.router, admin.router,
                reports.router, fallback.router)
     for router in private:
@@ -69,7 +83,12 @@ async def on_startup(bot: Bot) -> None:
             await ensure_bootstrap_admins(session, config.bootstrap_admin_ids)
     await bot.set_my_commands(COMMANDS)
     me = await bot.me()
-    log.info("Бот запущен: @%s", me.username)
+    log.info(
+        "Бот запущен: @%s | python %s | uvloop: %s",
+        me.username,
+        ".".join(map(str, __import__("sys").version_info[:3])),
+        "да" if _UVLOOP else "нет",
+    )
 
 
 async def main() -> None:
@@ -89,6 +108,8 @@ async def main() -> None:
         scheduler.shutdown(wait=False)
         await bot.session.close()
 
+
+_UVLOOP = _use_uvloop()
 
 if __name__ == "__main__":
     try:

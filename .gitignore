@@ -3,6 +3,8 @@ __pycache__/
 .env
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 exports/
 .venv/
 google_credentials.json

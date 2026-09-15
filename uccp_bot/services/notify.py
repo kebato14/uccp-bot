@@ -1,6 +1,7 @@
 """Точечные уведомления (п.41). Пишем только тем, кому информация действительно нужна."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Iterable, List, Optional
 
@@ -50,13 +51,19 @@ async def notify_admins(
     keyboard: Optional[InlineKeyboardMarkup] = None,
     exclude_user_id: Optional[int] = None,
 ) -> int:
-    sent = 0
-    for admin in await routing.admins(session):
-        if exclude_user_id and admin.id == exclude_user_id:
-            continue
-        if await send_to_user(bot, admin, text, keyboard):
-            sent += 1
-    return sent
+    """Рассылка администраторам — параллельно, чтобы не ждать каждого по очереди."""
+    targets = [
+        admin
+        for admin in await routing.admins(session)
+        if not (exclude_user_id and admin.id == exclude_user_id)
+    ]
+    if not targets:
+        return 0
+    results = await asyncio.gather(
+        *(send_to_user(bot, admin, text, keyboard) for admin in targets),
+        return_exceptions=True,
+    )
+    return sum(1 for r in results if r is True)
 
 
 async def send_attachments(
