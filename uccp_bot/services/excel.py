@@ -1,4 +1,9 @@
-"""Выгрузка заявок в Excel (п.36)."""
+"""Выгрузка заявок в Excel (п.36).
+
+Функции export_* делают синхронную работу (openpyxl), поэтому вызывать их
+из обработчиков нужно через `run_export` — иначе на время формирования файла
+бот перестаёт отвечать всем остальным пользователям.
+"""
 from __future__ import annotations
 
 import os
@@ -183,3 +188,10 @@ def export_combined(tech_requests, org_requests, title: str = "Сводный о
     path = os.path.join(config.export_dir, f"uccp_combined_{stamp}.xlsx")
     wb.save(path)
     return path
+
+
+async def run_export(func, *args, **kwargs) -> str:
+    """Формирование файла в отдельном потоке — бот остаётся отзывчивым."""
+    import asyncio
+
+    return await asyncio.to_thread(func, *args, **kwargs)

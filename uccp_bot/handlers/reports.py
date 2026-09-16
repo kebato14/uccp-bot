@@ -433,7 +433,7 @@ async def download_excel(
         if not rows:
             await call.message.answer("За выбранный период заявок УЦЦП нет.")
             return
-        path = excel.export_org_requests(rows, title=filters.describe())
+        path = await excel.run_export(excel.export_org_requests, rows, title=filters.describe())
         caption = f"📥 Организационные заявки УЦЦП {filters.describe()} — {len(rows)} шт."
     elif module == "all":
         tech_rows = await reports.fetch_requests(session, filters)
@@ -441,7 +441,7 @@ async def download_excel(
         if not tech_rows and not org_rows:
             await call.message.answer("За выбранный период заявок нет.")
             return
-        path = excel.export_combined(tech_rows, org_rows)
+        path = await excel.run_export(excel.export_combined, tech_rows, org_rows)
         caption = (
             f"📥 Сводная выгрузка {filters.describe()}\n"
             f"Ремонтные: {len(tech_rows)} · Организационные: {len(org_rows)}\n"
@@ -452,7 +452,7 @@ async def download_excel(
         if not rows:
             await call.message.answer("За выбранный период заявок нет — выгружать нечего.")
             return
-        path = excel.export_requests(rows, title=filters.describe())
+        path = await excel.run_export(excel.export_requests, rows, title=filters.describe())
         caption = f"📥 Выгрузка заявок {filters.describe()} — {len(rows)} шт."
 
     await call.message.answer_document(FSInputFile(path), caption=caption)
@@ -524,7 +524,7 @@ async def gsheets_run(
         if not rows:
             await call.message.answer(f"За {label} заявок нет — выгружать нечего.")
             return
-        path = excel.export_requests(rows, title=label)
+        path = await excel.run_export(excel.export_requests, rows, title=label)
         await call.message.answer_document(
             FSInputFile(path),
             caption=(

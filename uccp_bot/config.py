@@ -32,6 +32,11 @@ class Config:
     currency: str = os.getenv("CURRENCY", "сомони")
     overdue_check_minutes: int = int(os.getenv("OVERDUE_CHECK_MINUTES", "15"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    # сеть до Telegram: короткий long-poll и таймаут чуть больше него,
+    # чтобы обрыв связи обнаруживался за секунды, а не за минуту
+    polling_timeout: int = int(os.getenv("POLLING_TIMEOUT", "20"))
+    api_timeout: int = int(os.getenv("API_TIMEOUT", "30"))
+    telegram_proxy: str = os.getenv("TELEGRAM_PROXY", "")
     bootstrap_admin_ids: List[int] = field(
         default_factory=lambda: _int_list(os.getenv("BOOTSTRAP_ADMIN_IDS", ""))
     )

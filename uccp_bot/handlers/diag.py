@@ -134,3 +134,58 @@ async def cmd_diag(
         "сервера, а не в боте. Помогает: сервер ближе к Европе, "
         "либо прокси или туннель до Telegram."
     )
+
+
+@router.message(Command("perf"))
+async def cmd_perf(message: types.Message, user: Optional[User]) -> None:
+    """Скорость по этапам на реальных нажатиях пользователей."""
+    if user is None or not user.is_admin:
+        await message.answer(texts.NO_ACCESS)
+        return
+
+    from ..services import perf
+
+    data = perf.stats()
+    if not data:
+        await message.answer(
+            "📊 Данных пока нет — бот только запустился.\n"
+            "Понажимайте кнопки несколько минут и повторите /perf."
+        )
+        return
+
+    lines = [
+        f"📊 <b>Скорость обработки</b> (последние {int(data['count'])} действий)",
+        "",
+        "<b>Полный цикл</b> — от получения до ответа:",
+        f"• обычно: <b>{data['total_p50']:.0f} мс</b>",
+        f"• в худших 5%: {data['total_p95']:.0f} мс",
+        f"• максимум: {data['total_max']:.0f} мс",
+        "",
+        "<b>Из чего складывается:</b>",
+        f"🗄 база данных: {data['db_p50']:.0f} мс (макс {data['db_max']:.0f})",
+        f"📡 Telegram API: {data['api_p50']:.0f} мс (макс {data['api_max']:.0f}), "
+        f"{data['api_calls_avg']:.1f} вызова на действие",
+        f"⚙️ логика бота: {data['own_p50']:.0f} мс",
+        "",
+    ]
+
+    api_share = data["api_p50"] / data["total_p50"] * 100 if data["total_p50"] else 0
+    if api_share > 60:
+        lines.append(
+            f"<b>Вывод:</b> {api_share:.0f}% времени уходит на связь с Telegram. "
+            "Ускорять нужно канал сервера, код здесь ни при чём."
+        )
+    elif data["db_p50"] > data["total_p50"] * 0.4:
+        lines.append("<b>Вывод:</b> основное время — база данных.")
+    else:
+        lines.append("<b>Вывод:</b> узких мест нет, бот отвечает быстро.")
+
+    slow = perf.slowest(3)
+    if slow and slow[0].total_ms > 1500:
+        lines += ["", "<b>Самые долгие действия:</b>"]
+        for s in slow:
+            lines.append(
+                f"• {esc(s.label or s.kind)} — {s.total_ms:.0f} мс "
+                f"(API {s.api_ms:.0f}, база {s.db_ms:.0f})"
+            )
+    await message.answer("\n".join(lines))

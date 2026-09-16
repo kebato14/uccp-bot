@@ -1,6 +1,8 @@
 """Middleware: сессия БД и текущий пользователь в каждом обработчике."""
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from aiogram import BaseMiddleware
@@ -9,6 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..db.models import User
+
+
+log = logging.getLogger(__name__)
 
 
 class DbSessionMiddleware(BaseMiddleware):
@@ -101,3 +106,39 @@ def _status_hint(user: "User", texts, UserStatus) -> str:
     if user.status == UserStatus.REJECTED:
         return "Заявка на регистрацию отклонена. Отправьте /start, чтобы подать заново."
     return texts.DISABLED_HINT
+
+
+
+class PerfMiddleware(BaseMiddleware):
+    """Замер полного времени обработки обновления по этапам."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        from ..services import perf
+
+        perf.reset()
+        started = time.perf_counter()
+        try:
+            return await handler(event, data)
+        finally:
+            update = data.get("event_update")
+            kind, label = "update", ""
+            if update is not None:
+                if update.message is not None:
+                    kind = "message"
+                    label = (update.message.text or update.message.content_type or "")[:40]
+                elif update.callback_query is not None:
+                    kind = "callback"
+                    label = (update.callback_query.data or "")[:40]
+            sample = perf.record(kind, label, time.perf_counter() - started)
+            if sample.total_ms > 3000:
+                log.warning(
+                    "Медленная обработка %s «%s»: %.0f мс "
+                    "(база %.0f мс, Telegram API %.0f мс / %s вызовов)",
+                    kind, label, sample.total_ms, sample.db_ms,
+                    sample.api_ms, sample.api_calls,
+                )

@@ -171,7 +171,10 @@ async def monthly_google_report(
                 "Чтобы включить автоматическую выгрузку в таблицу, подложите ключ "
                 "сервисного аккаунта (см. README, раздел «Google Sheets»)."
             )
-            path = excel.export_requests(requests, title=label) if requests else None
+            path = (
+                await excel.run_export(excel.export_requests, requests, title=label)
+                if requests else None
+            )
             for user in recipients:
                 await notify.send_to_user(bot, user, text)
                 if path and user.tg_id:

@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
+
+import time
+
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from .config import config
 from .db.base import SessionMaker, init_db
@@ -20,6 +25,7 @@ from .handlers import (
 from .middlewares.context import (
     AccessMiddleware,
     DbSessionMiddleware,
+    PerfMiddleware,
     UserMiddleware,
 )
 from .scheduler import setup_scheduler
@@ -49,12 +55,61 @@ COMMANDS = [
     BotCommand(command="cancel", description="Отменить текущее действие"),
     BotCommand(command="id", description="Показать мой Telegram ID"),
     BotCommand(command="ping", description="Скорость работы (для администратора)"),
+    BotCommand(command="perf", description="Замеры по этапам (для администратора)"),
 ]
+
+
+class TimedSession(AiohttpSession):
+    """Сессия Telegram с замером времени каждого вызова API."""
+
+    async def make_request(self, bot, method, timeout=None):
+        from .services import perf
+
+        started = time.perf_counter()
+        try:
+            return await super().make_request(bot, method, timeout=timeout)
+        finally:
+            perf.add_api(time.perf_counter() - started)
+
+
+def acquire_single_instance_lock() -> object:
+    """Не даём запустить второго бота с тем же токеном.
+
+    Два бота на одном токене делят обновления между собой: половина нажатий
+    уходит «не туда» и остаётся без ответа — со стороны это выглядит как
+    сильные тормоза и потерянные кнопки.
+    """
+    import fcntl
+    import tempfile
+
+    path = os.path.join(
+        tempfile.gettempdir(), f"uccp_bot_{config.bot_token.split(':')[0]}.lock"
+    )
+    handle = open(path, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise RuntimeError(
+            "Бот уже запущен на этом компьютере (блокировка " + path + ").\n"
+            "Два бота с одним токеном делят обновления между собой и работают "
+            "с задержками. Остановите лишний процесс: pkill -f uccp_bot.bot"
+        )
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
+def build_session() -> TimedSession:
+    """Таймауты подобраны так, чтобы обрыв связи не подвешивал бота надолго."""
+    session = TimedSession(timeout=config.api_timeout, proxy=config.telegram_proxy or None)
+    return session
 
 
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
 
+    dp.update.middleware(PerfMiddleware())
     dp.update.middleware(DbSessionMiddleware(SessionMaker))
     dp.update.middleware(UserMiddleware())
     # доступ к рабочему функционалу — только после подтверждения администратором
@@ -93,8 +148,10 @@ async def on_startup(bot: Bot) -> None:
 
 async def main() -> None:
     config.validate()
+    lock = acquire_single_instance_lock()      # держим до завершения процесса
     bot = Bot(
         token=config.bot_token,
+        session=build_session(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = build_dispatcher()
@@ -103,7 +160,12 @@ async def main() -> None:
     scheduler = setup_scheduler(SessionMaker, bot)
     scheduler.start()
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            polling_timeout=config.polling_timeout,
+            handle_signals=True,
+        )
     finally:
         scheduler.shutdown(wait=False)
         await bot.session.close()

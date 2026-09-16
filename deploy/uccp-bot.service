@@ -1,0 +1,41 @@
+# Бот заявок УЦЦП — служба systemd.
+# Установка:
+#   sudo cp deploy/uccp-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now uccp-bot
+# Логи:  journalctl -u uccp-bot -f
+
+[Unit]
+Description=Бот заявок УЦЦП (Hotdogger / Moose Cafe)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uccp
+WorkingDirectory=/opt/uccp-bot
+ExecStart=/opt/uccp-bot/.venv/bin/python -m uccp_bot.bot
+
+# перезапуск при любом падении и после перезагрузки сервера
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+# корректная остановка: бот успевает закрыть соединения
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+# логи в журнал системы
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=uccp-bot
+
+# базовая изоляция
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/uccp-bot
+
+[Install]
+WantedBy=multi-user.target
