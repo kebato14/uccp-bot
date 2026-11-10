@@ -102,7 +102,7 @@ class Status:
         ACCEPTED: "👍 Принята",
         RESCHEDULE_PROPOSED: "📅 Предложен новый срок",
         IN_PROGRESS: "🔧 В процессе",
-        DONE: "✅ Выполнена",
+        DONE: "✅ Выполнена · ожидает согласования",
         RETURNED: "🔄 Возвращена на доработку",
         CONFIRMED: "☑️ Подтверждена",
         CLOSED: "🔒 Закрыта",
@@ -427,6 +427,10 @@ class Request(Base):
 
     is_overdue: Mapped[bool] = mapped_column(Boolean, default=False)
     overdue_notified_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    # предупреждение «срок подходит» отправляется один раз
+    due_soon_notified_at: Mapped[Optional[dt.datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
     source_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     # Работа входит в фиксированную ежемесячную оплату мастера — отдельной
     # суммы к оплате по заявке нет. Отметка ставится в момент выполнения,
@@ -650,6 +654,9 @@ class OrgRequest(Base):
 
     is_overdue: Mapped[bool] = mapped_column(Boolean, default=False)
     overdue_notified_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    due_soon_notified_at: Mapped[Optional[dt.datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
 
     author: Mapped["User"] = relationship(foreign_keys=[author_id])
     assignee: Mapped[Optional["User"]] = relationship(foreign_keys=[assignee_id])

@@ -98,6 +98,29 @@ async def fetch_requests(session: AsyncSession, f: ReportFilters) -> List[Reques
 
 
 @dataclass
+class ExecutorStat:
+    """Эффективность одного исполнителя."""
+
+    name: str
+    total: int = 0
+    closed: int = 0
+    overdue: int = 0
+    on_time: int = 0
+    cost: float = 0.0
+    hours_sum: float = 0.0
+    hours_count: int = 0
+
+    @property
+    def on_time_share(self) -> int:
+        done = self.on_time + self.overdue
+        return round(self.on_time / done * 100) if done else 0
+
+    @property
+    def avg_hours(self) -> float:
+        return self.hours_sum / self.hours_count if self.hours_count else 0.0
+
+
+@dataclass
 class ReportData:
     total: int = 0
     closed: int = 0
@@ -112,6 +135,7 @@ class ReportData:
     by_outlet: Dict[str, Tuple[int, float]] = field(default_factory=dict)
     by_executor: Dict[str, Tuple[int, float]] = field(default_factory=dict)
     by_category: Dict[str, Tuple[int, float]] = field(default_factory=dict)
+    executors: Dict[str, "ExecutorStat"] = field(default_factory=dict)
 
 
 def _bump(store: Dict[str, Tuple[int, float]], key: str, cost: float) -> None:
@@ -146,11 +170,25 @@ async def build_report(session: AsyncSession, f: ReportFilters) -> ReportData:
         _bump(data.by_brand, req.brand.name, cost)
         _bump(data.by_outlet, req.outlet.name, cost)
         _bump(data.by_category, req.category.name, cost)
-        _bump(
-            data.by_executor,
-            req.executor.full_name if req.executor else "не назначен",
-            cost,
-        )
+        name = req.executor.full_name if req.executor else "не назначен"
+        _bump(data.by_executor, name, cost)
+
+        # эффективность: доля в срок и среднее время выполнения
+        stat = data.executors.setdefault(name, ExecutorStat(name=name))
+        stat.total += 1
+        stat.cost += cost
+        if req.status in (Status.CLOSED, Status.CONFIRMED):
+            stat.closed += 1
+        if req.done_at and req.created_at:
+            stat.hours_sum += (req.done_at - req.created_at).total_seconds() / 3600
+            stat.hours_count += 1
+        if req.done_at and req.due_at:
+            if req.done_at <= req.due_at:
+                stat.on_time += 1
+            else:
+                stat.overdue += 1
+        elif req.is_overdue:
+            stat.overdue += 1
 
     data.avg_cost = data.total_cost / paid if paid else 0.0
     return data
@@ -164,6 +202,27 @@ def _section(title: str, store: Dict[str, Tuple[int, float]], limit: int = 10) -
     for name, (count, cost) in rows:
         suffix = f" · {fmt_money(cost)}" if cost else ""
         lines.append(f"• {esc(name)}: {count}{suffix}")
+    return lines
+
+
+def _executor_section(executors: Dict[str, "ExecutorStat"], limit: int = 10) -> List[str]:
+    """Эффективность каждого исполнителя: сколько, в срок, за какое время."""
+    real = {k: v for k, v in executors.items() if k != "не назначен"}
+    if not real:
+        return []
+    rows = sorted(real.values(), key=lambda s: (-s.total, s.name))[:limit]
+    lines = ["", "<b>Эффективность исполнителей</b>"]
+    for stat in rows:
+        parts = [f"заявок {stat.total}", f"закрыто {stat.closed}"]
+        if stat.on_time + stat.overdue:
+            parts.append(f"в срок {stat.on_time_share}%")
+        if stat.overdue:
+            parts.append(f"просрочено {stat.overdue}")
+        if stat.avg_hours:
+            parts.append(f"среднее время {stat.avg_hours:.1f} ч")
+        if stat.cost:
+            parts.append(fmt_money(stat.cost))
+        lines.append(f"• {esc(stat.name)}: " + ", ".join(parts))
     return lines
 
 
@@ -188,8 +247,8 @@ def render_report(data: ReportData, f: ReportFilters) -> str:
         )
     lines += _section("По брендам", data.by_brand)
     lines += _section("По точкам", data.by_outlet)
-    lines += _section("По исполнителям", data.by_executor)
     lines += _section("По категориям", data.by_category)
+    lines += _executor_section(data.executors)
     if data.total == 0:
         lines.append("\nЗа выбранный период заявок нет.")
     return "\n".join(lines)

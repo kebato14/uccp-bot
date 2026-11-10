@@ -299,6 +299,41 @@ async def main() -> None:
         check(os.path.exists(path) and os.path.getsize(path) > 3000,
               f"Excel выгружен: {os.path.basename(path)}")
 
+        # --- Эффективность исполнителей и напоминание о сроке ---
+        print("\n--- Эффективность исполнителей ---")
+        today = dt.date.today()
+        f2 = reports.ReportFilters(date_from=today, date_to=today,
+                                   period_title="за сегодня")
+        rep = await reports.build_report(session, f2)
+        stats = rep.executors
+        check(bool(stats), f"Статистика по исполнителям собрана: {len(stats)}")
+        naz = stats.get("Назрулло")
+        check(naz is not None and naz.closed >= 1, "Закрытые заявки посчитаны по мастеру")
+        check(naz.on_time_share >= 0 and naz.hours_count >= 1,
+              f"Доля «в срок» и среднее время считаются: {naz.on_time_share}%, "
+              f"{naz.avg_hours:.1f} ч")
+        text2 = reports.render_report(rep, f2)
+        check("Эффективность исполнителей" in text2, "Блок эффективности есть в отчёте")
+        check("в срок" in text2, "Показана доля выполненных в срок")
+
+        print("\n--- Напоминание о приближении срока ---")
+        SENT.clear()
+        soon = await make_request(session, manager, brand, outlet, electric, hours=1)
+        await flow.dispatch_request(session, bot, soon, actor=manager)
+        await session.commit()
+        from uccp_bot.scheduler import check_due_soon
+
+        class OneSession:
+            def __call__(self):
+                return SessionMaker()
+
+        await check_due_soon(OneSession(), bot)
+        check(any("Срок подходит" in t for _, t in SENT),
+              "Исполнитель предупреждён о приближении срока")
+        async with SessionMaker() as check_session:
+            fresh = await check_session.get(Request, soon.id)
+            check(fresh.due_soon_notified_at is not None, "Повторно не напомнит")
+
         # --- Просрочка ---
         print("\n--- Просрочка ---")
         SENT.clear()

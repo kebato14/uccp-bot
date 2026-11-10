@@ -25,6 +25,8 @@ COLUMNS = [
     ("users", "reject_reason", "TEXT"),
     ("users", "fixed_payment", "BOOLEAN DEFAULT 0"),
     ("requests", "cost_exempt", "BOOLEAN DEFAULT 0"),
+    ("requests", "due_soon_notified_at", "DATETIME"),
+    ("org_requests", "due_soon_notified_at", "DATETIME"),
     ("org_requests", "request_type", "VARCHAR(16) DEFAULT 'task'"),
     ("org_requests", "quantity", "VARCHAR(120)"),
     ("org_requests", "reason", "TEXT"),

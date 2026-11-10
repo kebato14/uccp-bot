@@ -47,6 +47,83 @@ async def check_overdue(session_maker: async_sessionmaker, bot: Bot) -> None:
             log.info("Отмечено просроченных заявок: %s", len(rows))
 
 
+async def check_due_soon(session_maker: async_sessionmaker, bot: Bot) -> None:
+    """Предупреждение о приближении срока — за N часов до дедлайна."""
+    from .db.models import OrgRequest, OrgStatus
+    from .services import org
+
+    horizon = utcnow() + dt.timedelta(hours=config.due_soon_hours)
+
+    async with session_maker() as session:
+        # технические заявки
+        rows = (
+            await session.scalars(
+                select(Request)
+                .where(
+                    Request.status.in_((Status.NEW, Status.ACCEPTED, Status.IN_PROGRESS,
+                                        Status.RETURNED)),
+                    Request.due_at.is_not(None),
+                    Request.due_at <= horizon,
+                    Request.due_at > utcnow(),
+                    Request.due_soon_notified_at.is_(None),
+                )
+                .options(*REQUEST_LOAD_OPTIONS)
+            )
+        ).all()
+        for request in rows:
+            request.due_soon_notified_at = utcnow()
+            text = (
+                f"⏰ <b>Срок подходит</b>\n"
+                f"Заявка {esc(request.number)} · {esc(request.outlet.name)}\n"
+                f"Категория: {esc(request.category.name)}\n"
+                f"Выполнить до: <b>{fmt_dt(request.due_at)}</b>\n"
+                f"Статус: {Status.title(request.status)}\n\n"
+                f"📝 {esc(request.description)}"
+            )
+            await notify.send_to_user(bot, request.executor, text)
+            if request.status == Status.NEW:
+                # заявку даже не приняли — подключаем администратора
+                await notify.notify_admins(
+                    session, bot,
+                    "⏰ Срок подходит, а заявка ещё не принята исполнителем.\n\n" + text,
+                )
+
+        # обращения в УЦЦП
+        org_rows = (
+            await session.scalars(
+                select(OrgRequest)
+                .where(
+                    OrgRequest.status.in_(OrgStatus.OPEN),
+                    OrgRequest.due_at.is_not(None),
+                    OrgRequest.due_at <= horizon,
+                    OrgRequest.due_at > utcnow(),
+                    OrgRequest.due_soon_notified_at.is_(None),
+                )
+                .options(*org.ORG_LOAD_OPTIONS)
+            )
+        ).all()
+        for request in org_rows:
+            request.due_soon_notified_at = utcnow()
+            text = (
+                f"⏰ <b>Срок подходит</b>\n"
+                f"Обращение {esc(request.number)} · {esc(request.object_name)}\n"
+                f"Выполнить до: <b>{fmt_dt(request.due_at)}</b>\n"
+                f"Статус: {OrgStatus.title(request.status)}\n\n"
+                f"📝 {esc(request.description)}"
+            )
+            if request.assignee:
+                await notify.send_to_user(bot, request.assignee, text)
+            else:
+                await org.notify_uccp(session, bot, request)
+
+        if rows or org_rows:
+            await session.commit()
+            log.info(
+                "Предупреждений о приближении срока: %s заявок, %s обращений",
+                len(rows), len(org_rows),
+            )
+
+
 async def check_org_overdue(session_maker: async_sessionmaker, bot: Bot) -> None:
     """Просроченные организационные заявки УЦЦП."""
     from .db.models import OrgRequest, OrgStatus
@@ -277,6 +354,13 @@ def setup_scheduler(session_maker: async_sessionmaker, bot: Bot) -> AsyncIOSched
         IntervalTrigger(minutes=config.overdue_check_minutes),
         args=(session_maker, bot),
         id="check_org_overdue",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_due_soon,
+        IntervalTrigger(minutes=config.overdue_check_minutes),
+        args=(session_maker, bot),
+        id="check_due_soon",
         replace_existing=True,
     )
     scheduler.add_job(
