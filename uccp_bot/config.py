@@ -39,6 +39,15 @@ class Config:
     polling_timeout: int = int(os.getenv("POLLING_TIMEOUT", "20"))
     api_timeout: int = int(os.getenv("API_TIMEOUT", "30"))
     telegram_proxy: str = os.getenv("TELEGRAM_PROXY", "")
+
+    # --- панель просмотра в браузере ---
+    web_enabled: bool = os.getenv("WEB_ENABLED", "1") not in ("0", "false", "")
+    # по умолчанию только локально: наружу выставлять через HTTPS-прокси
+    web_host: str = os.getenv("WEB_HOST", "127.0.0.1")
+    web_port: int = int(os.getenv("WEB_PORT", "8080"))
+    web_secret: str = os.getenv("WEB_SECRET", "")
+    web_https: bool = os.getenv("WEB_HTTPS", "0") not in ("0", "false", "")
+    web_base_url: str = os.getenv("WEB_BASE_URL", "")
     bootstrap_admin_ids: List[int] = field(
         default_factory=lambda: _int_list(os.getenv("BOOTSTRAP_ADMIN_IDS", ""))
     )

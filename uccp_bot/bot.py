@@ -20,7 +20,7 @@ from .db.base import SessionMaker, init_db
 from .db.seed import ensure_bootstrap_admins, seed
 from .handlers import (
     actions, admin, approval, create, diag, fallback, groups,
-    help as help_handlers, lists, org, reports, start,
+    help as help_handlers, lists, org, panel, reports, start,
 )
 from .middlewares.context import (
     AccessMiddleware,
@@ -56,6 +56,7 @@ COMMANDS = [
     BotCommand(command="id", description="Показать мой Telegram ID"),
     BotCommand(command="ping", description="Скорость работы (для администратора)"),
     BotCommand(command="perf", description="Замеры по этапам (для администратора)"),
+    BotCommand(command="panel", description="Вход в панель просмотра"),
 ]
 
 
@@ -117,8 +118,8 @@ def build_dispatcher() -> Dispatcher:
     dp.callback_query.outer_middleware(AccessMiddleware())
 
     # Личные чаты
-    private = (start.router, approval.router, diag.router, help_handlers.router,
-               create.router,
+    private = (start.router, approval.router, diag.router, panel.router,
+               help_handlers.router, create.router,
                lists.router, org.router, actions.router, admin.router,
                reports.router, fallback.router)
     for router in private:
@@ -159,6 +160,14 @@ async def main() -> None:
     await on_startup(bot)
     scheduler = setup_scheduler(SessionMaker, bot)
     scheduler.start()
+
+    from .web.app import start_panel
+
+    panel_runner = await start_panel(SessionMaker)
+    if panel_runner is not None:
+        log.info(
+            "Панель просмотра: http://%s:%s", config.web_host, config.web_port
+        )
     try:
         await dp.start_polling(
             bot,
@@ -168,6 +177,8 @@ async def main() -> None:
         )
     finally:
         scheduler.shutdown(wait=False)
+        if panel_runner is not None:
+            await panel_runner.cleanup()
         await bot.session.close()
 
 
