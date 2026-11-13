@@ -101,7 +101,12 @@ def render_card(
                 f"💰 Работы: {fmt_money(request.work_cost)}",
                 f"🧰 Материалы: {fmt_money(request.material_cost)}",
                 f"Σ Итого: <b>{fmt_money(request.total_cost)}</b>",
+                f"Согласование: <b>{request.cost_status_title}</b>",
             ]
+            if request.cost_reject_reason:
+                lines.append(
+                    f"❌ Причина отклонения: {esc(request.cost_reject_reason)}"
+                )
         after = media_summary(request, "after")
         if after != "нет":
             lines.append(f"📸 Фото результата: {after}")

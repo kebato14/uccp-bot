@@ -7,12 +7,15 @@ from typing import Optional
 from aiogram import Bot, F, Router, types
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import texts
 from ..callbacks import CalendarCB, ReqCB
-from ..db.models import Attachment, Category, Comment, Cost, Request, Status, User
+from ..db.models import (
+    Attachment, Category, Comment, Cost, CostStatus, Request, Status, User,
+)
 from ..keyboards.calendar import calendar_kb, time_kb
 from ..keyboards.common import cancel_kb, main_menu, remove_kb, BTN_CANCEL
 from ..keyboards.request import (
@@ -30,6 +33,29 @@ from ..states import ExecutorFlow, ManagerFlow, AdminFlow
 from ..utils import esc, fmt_dt, fmt_money, parse_amount, utc_from_local, utcnow
 
 router = Router(name="actions")
+
+# Руководители (главный операционный директор и операционный директор)
+# только наблюдают: любые действия с заявкой им закрыты (матрица прав ТЗ).
+VIEW_ONLY_ACTS = {"card", "history", "media"}
+
+
+@router.callback_query.outer_middleware
+async def block_viewers(handler, event: types.CallbackQuery, data):
+    user: Optional[User] = data.get("user")
+    if user is not None and user.is_viewer and event.data:
+        try:
+            act = ReqCB.unpack(event.data).act
+        except Exception:
+            act = None
+        if act and act not in VIEW_ONLY_ACTS:
+            await event.answer(
+                "Ваша роль — просмотр, мониторинг и отчётность. "
+                "Действия с заявками выполняет исполнитель, "
+                "изменения — главный администратор.",
+                show_alert=True,
+            )
+            return None
+    return await handler(event, data)
 
 
 async def _get(session: AsyncSession, call: types.CallbackQuery, request_id: int):
@@ -209,6 +235,13 @@ async def act_propose(
     if not _is_executor_of(user, request):
         await call.answer(texts.NO_ACCESS, show_alert=True)
         return
+    if not request.executor_can_edit_due():
+        await call.answer(
+            "Срок уже отправлен на согласование — изменить его может только "
+            "главный администратор.",
+            show_alert=True,
+        )
+        return
     await state.set_state(ExecutorFlow.propose_date)
     await state.update_data(request_id=request.id)
     await call.answer()
@@ -253,6 +286,8 @@ async def propose_time(
         data["year"], data["month"], data["day"], callback_data.hour, callback_data.minute
     )
     request.proposed_due_at = utc_from_local(proposed_local)
+    # данные отправлены на согласование — исполнителю правка закрыта
+    request.due_locked = True
     old = request.status
     request.status = Status.RESCHEDULE_PROPOSED
     await history.log(
@@ -309,6 +344,7 @@ async def act_due_decision(
             f"<b>{fmt_dt(request.due_at)}</b>."
         )
     else:
+        request.due_locked = False      # можно предложить другой срок
         await history.log(
             session, request, "due_declined", user=user,
             details=f"Оставлен прежний срок {fmt_dt(request.due_at)}",
@@ -511,9 +547,15 @@ async def _finalize_done(
         # работа входит в фиксированную месячную оплату — суммы не заводим
         request.work_cost = None
         request.material_cost = None
+        request.cost_status = CostStatus.NONE
     else:
         request.work_cost = data.get("work_cost", 0)
         request.material_cost = material_cost or 0
+        # стоимость зафиксирована и отправлена на согласование:
+        # исполнитель её больше не правит (матрица прав ТЗ)
+        request.cost_status = CostStatus.PENDING
+        request.cost_submitted_at = utcnow()
+        request.cost_reject_reason = None
         session.add(
             Cost(request_id=request.id, kind="work",
                  amount=request.work_cost, added_by_id=user.id)
@@ -547,6 +589,15 @@ async def _finalize_done(
         session, request, "done", user=user, old_status=old, new_status=Status.DONE,
         details=details,
     )
+    if request.cost_status == CostStatus.PENDING:
+        await history.log(
+            session, request, "cost_submitted", user=user,
+            details=(
+                f"Стоимость отправлена на согласование: "
+                f"работы {fmt_money(request.work_cost)}, "
+                f"материалы {fmt_money(request.material_cost)}"
+            ),
+        )
     await session.commit()
     await session.refresh(request, ["attachments"])
     await state.clear()
@@ -577,6 +628,30 @@ async def _finalize_done(
             caption=f"{request.number} — фото результата",
         )
     await notify.notify_admins(session, bot, text, exclude_user_id=request.author_id)
+
+    if request.cost_status == CostStatus.PENDING:
+        kb = InlineKeyboardBuilder()
+        kb.button(
+            text="✅ Согласовать стоимость",
+            callback_data=ReqCB(act="cost_ok", request_id=request.id).pack(),
+        )
+        kb.button(
+            text="❌ Отклонить стоимость",
+            callback_data=ReqCB(act="cost_no", request_id=request.id).pack(),
+        )
+        kb.adjust(1)
+        await notify.notify_admins(
+            session,
+            bot,
+            f"💰 <b>Стоимость на согласование</b>\n"
+            f"Заявка {esc(request.number)} · {esc(request.outlet.name)}\n"
+            f"Исполнитель: {esc(user.full_name)}\n\n"
+            f"Работы: {fmt_money(request.work_cost)}\n"
+            f"Материалы: {fmt_money(request.material_cost)}\n"
+            f"Итого: <b>{fmt_money(request.total_cost)}</b>\n\n"
+            f"Работы: <i>{esc(request.executor_comment or '')}</i>",
+            kb.as_markup(),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -967,7 +1042,11 @@ async def cancel_reason(
 
 # Только состояния этого роутера — состояния админ-панели обрабатывает handlers/admin.py
 @router.message(
-    StateFilter(ExecutorFlow, ManagerFlow, AdminFlow.cancel_reason, AdminFlow.assign_pick)
+    StateFilter(
+        ExecutorFlow, ManagerFlow, AdminFlow.cancel_reason, AdminFlow.assign_pick,
+        AdminFlow.cost_reason, AdminFlow.edit_cost_work, AdminFlow.edit_cost_material,
+        AdminFlow.edit_reason,
+    )
 )
 async def flow_wrong_input(message: types.Message, state: FSMContext) -> None:
     current = await state.get_state()
@@ -975,3 +1054,273 @@ async def flow_wrong_input(message: types.Message, state: FSMContext) -> None:
         await message.answer("Отправьте фото результата или напишите «готово».")
     else:
         await message.answer("Для продолжения отправьте текст сообщением или нажмите «❌ Отмена».")
+
+
+# --------------------------------------------------------------------------- #
+# Согласование стоимости работ — право главного администратора
+# --------------------------------------------------------------------------- #
+@router.callback_query(ReqCB.filter(F.act == "cost_ok"))
+async def act_cost_approve(
+    call: types.CallbackQuery,
+    callback_data: ReqCB,
+    session: AsyncSession,
+    user: Optional[User],
+    bot: Bot,
+) -> None:
+    request = await _get(session, call, callback_data.request_id)
+    if request is None:
+        return
+    if user is None or not user.can_approve_cost:
+        await call.answer(
+            "Согласовать стоимость может только главный администратор.", show_alert=True
+        )
+        return
+    if request.cost_status != CostStatus.PENDING:
+        await call.answer(
+            f"Стоимость уже {request.cost_status_title}.", show_alert=True
+        )
+        return
+
+    request.cost_status = CostStatus.APPROVED
+    request.cost_decided_at = utcnow()
+    request.cost_decided_by_id = user.id
+    await history.log(
+        session, request, "cost_approved", user=user,
+        details=f"Согласована стоимость {fmt_money(request.total_cost)}",
+    )
+    await session.commit()
+    await call.answer("Стоимость согласована")
+    await call.message.answer(
+        f"✅ Стоимость по заявке <b>{esc(request.number)}</b> согласована: "
+        f"{fmt_money(request.total_cost)}"
+    )
+    await notify.send_to_user(
+        bot,
+        request.executor,
+        f"✅ Стоимость по заявке <b>{esc(request.number)}</b> согласована: "
+        f"{fmt_money(request.total_cost)}",
+    )
+
+
+@router.callback_query(ReqCB.filter(F.act == "cost_no"))
+async def act_cost_reject(
+    call: types.CallbackQuery,
+    callback_data: ReqCB,
+    session: AsyncSession,
+    state: FSMContext,
+    user: Optional[User],
+) -> None:
+    request = await _get(session, call, callback_data.request_id)
+    if request is None:
+        return
+    if user is None or not user.can_approve_cost:
+        await call.answer(
+            "Согласовать стоимость может только главный администратор.", show_alert=True
+        )
+        return
+    await state.set_state(AdminFlow.cost_reason)
+    await state.update_data(request_id=request.id)
+    await call.answer()
+    await call.message.answer(
+        "Укажите <b>причину отклонения стоимости</b> — исполнитель её увидит "
+        "и сможет заявить сумму заново:",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(AdminFlow.cost_reason, F.text)
+async def cost_reject_reason(
+    message: types.Message,
+    state: FSMContext,
+    session: AsyncSession,
+    user: Optional[User],
+    bot: Bot,
+) -> None:
+    if message.text == BTN_CANCEL:
+        await state.clear()
+        await message.answer(texts.CANCELLED, reply_markup=main_menu(user))
+        return
+    data = await state.get_data()
+    request = await load_request(session, data["request_id"])
+    reason = message.text.strip()
+
+    request.cost_status = CostStatus.REJECTED
+    request.cost_decided_at = utcnow()
+    request.cost_decided_by_id = user.id
+    request.cost_reject_reason = reason
+    await history.log(
+        session, request, "cost_rejected", user=user,
+        details=f"Отклонена стоимость {fmt_money(request.total_cost)}. Причина: {reason}",
+    )
+    await session.commit()
+    await state.clear()
+    await message.answer(
+        f"❌ Стоимость по заявке <b>{esc(request.number)}</b> отклонена. "
+        "Исполнитель уведомлён и может заявить сумму заново.",
+        reply_markup=main_menu(user),
+    )
+    await notify.send_to_user(
+        bot,
+        request.executor,
+        f"❌ Стоимость по заявке <b>{esc(request.number)}</b> не согласована.\n"
+        f"Причина: <i>{esc(reason)}</i>\n\n"
+        "Укажите стоимость заново: откройте заявку и нажмите "
+        "«💰 Заявить стоимость».",
+    )
+
+
+@router.callback_query(ReqCB.filter(F.act == "cost_again"))
+async def act_cost_again(
+    call: types.CallbackQuery,
+    callback_data: ReqCB,
+    session: AsyncSession,
+    state: FSMContext,
+    user: Optional[User],
+) -> None:
+    """Повторная заявка стоимости после отклонения."""
+    request = await _get(session, call, callback_data.request_id)
+    if request is None:
+        return
+    if not _is_executor_of(user, request):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    if not request.executor_can_edit_cost():
+        await call.answer(
+            f"Стоимость {request.cost_status_title} — изменить её может только "
+            "главный администратор.",
+            show_alert=True,
+        )
+        return
+    await state.set_state(ExecutorFlow.done_work_cost)
+    await state.update_data(
+        request_id=request.id, done_media=[], fixed_payment=False,
+        done_comment=request.executor_comment, recost=True,
+    )
+    await call.answer()
+    await call.message.answer(
+        "Укажите <b>стоимость работ</b> (только число):", reply_markup=cancel_kb()
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Правка зафиксированных данных — только главный администратор, с причиной
+# --------------------------------------------------------------------------- #
+@router.callback_query(ReqCB.filter(F.act == "edit_cost"))
+async def act_edit_cost(
+    call: types.CallbackQuery,
+    callback_data: ReqCB,
+    session: AsyncSession,
+    state: FSMContext,
+    user: Optional[User],
+) -> None:
+    request = await _get(session, call, callback_data.request_id)
+    if request is None:
+        return
+    if user is None or not user.can_edit_locked:
+        await call.answer(
+            "Изменять зафиксированные данные вправе только главный администратор.",
+            show_alert=True,
+        )
+        return
+    await state.set_state(AdminFlow.edit_cost_work)
+    await state.update_data(request_id=request.id)
+    await call.answer()
+    await call.message.answer(
+        f"Текущая стоимость по заявке <b>{esc(request.number)}</b>:\n"
+        f"работы {fmt_money(request.work_cost)}, "
+        f"материалы {fmt_money(request.material_cost)} "
+        f"({request.cost_status_title})\n\n"
+        "Введите <b>новую стоимость работ</b> числом:",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(AdminFlow.edit_cost_work, F.text)
+async def edit_cost_work(
+    message: types.Message, state: FSMContext, user: Optional[User]
+) -> None:
+    if message.text == BTN_CANCEL:
+        await state.clear()
+        await message.answer(texts.CANCELLED, reply_markup=main_menu(user))
+        return
+    amount = parse_amount(message.text)
+    if amount is None:
+        await message.answer("Введите сумму числом, например: 250 или 250.50")
+        return
+    await state.update_data(new_work=amount)
+    await state.set_state(AdminFlow.edit_cost_material)
+    await message.answer("Введите <b>новую стоимость материалов</b> числом:")
+
+
+@router.message(AdminFlow.edit_cost_material, F.text)
+async def edit_cost_material(
+    message: types.Message, state: FSMContext, user: Optional[User]
+) -> None:
+    if message.text == BTN_CANCEL:
+        await state.clear()
+        await message.answer(texts.CANCELLED, reply_markup=main_menu(user))
+        return
+    amount = parse_amount(message.text)
+    if amount is None:
+        await message.answer("Введите сумму числом, например: 120 или 120.75")
+        return
+    await state.update_data(new_material=amount)
+    await state.set_state(AdminFlow.edit_reason)
+    await message.answer(
+        "Укажите <b>причину изменения</b> — она сохранится в истории заявки "
+        "вместе с первоначальными суммами:"
+    )
+
+
+@router.message(AdminFlow.edit_reason, F.text)
+async def edit_cost_reason(
+    message: types.Message,
+    state: FSMContext,
+    session: AsyncSession,
+    user: Optional[User],
+    bot: Bot,
+) -> None:
+    if message.text == BTN_CANCEL:
+        await state.clear()
+        await message.answer(texts.CANCELLED, reply_markup=main_menu(user))
+        return
+    reason = message.text.strip()
+    if len(reason) < 3:
+        await message.answer("Опишите причину подробнее — это требование журнала.")
+        return
+
+    data = await state.get_data()
+    request = await load_request(session, data["request_id"])
+    old_work, old_material = request.work_cost, request.material_cost
+
+    request.work_cost = data["new_work"]
+    request.material_cost = data["new_material"]
+    request.cost_status = CostStatus.APPROVED      # правка админа согласована сразу
+    request.cost_decided_at = utcnow()
+    request.cost_decided_by_id = user.id
+    # первоначальные данные сохраняются в истории
+    await history.log(
+        session, request, "cost_edited", user=user,
+        details=(
+            f"Было: работы {fmt_money(old_work)}, материалы {fmt_money(old_material)}. "
+            f"Стало: работы {fmt_money(request.work_cost)}, "
+            f"материалы {fmt_money(request.material_cost)}. "
+            f"Причина: {reason}"
+        ),
+    )
+    await session.commit()
+    await state.clear()
+    await message.answer(
+        f"✅ Стоимость по заявке <b>{esc(request.number)}</b> изменена.\n"
+        f"Было: {fmt_money(float(old_work or 0) + float(old_material or 0))} → "
+        f"стало: {fmt_money(request.total_cost)}\n\n"
+        "Первоначальные суммы сохранены в истории.",
+        reply_markup=main_menu(user),
+    )
+    await notify.send_to_user(
+        bot,
+        request.executor,
+        f"ℹ️ Главный администратор изменил стоимость по заявке "
+        f"<b>{esc(request.number)}</b>: {fmt_money(request.total_cost)}\n"
+        f"Причина: <i>{esc(reason)}</i>",
+    )

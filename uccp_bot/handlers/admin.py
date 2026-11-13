@@ -23,6 +23,7 @@ from ..db.models import (
     Outlet,
     RoleCode,
     User,
+    UserScope,
     UserStatus,
 )
 from ..keyboards.common import BTN_ADMIN, cancel_kb, main_menu
@@ -265,6 +266,11 @@ async def cb_user_card(
         f"Точка: {esc(outlet.name) if outlet else '—'}",
         f"Активировал бота: {'да' if target.tg_id else 'нет ⚠️'}",
     ]
+    if target.is_viewer:
+        lines.append(
+            "👁 Права: <b>только просмотр, мониторинг и отчётность</b> "
+            "(без изменения и удаления заявок)"
+        )
     if target.role_code == RoleCode.EXECUTOR:
         lines.append(f"💰 Оплата: <b>{target.payment_title}</b>")
         if target.fixed_payment:
@@ -304,6 +310,11 @@ async def cb_user_card(
         kb.button(text="🔁 Изменить роль", callback_data=AdminCB(act="role_pick", id=target.id).pack())
         kb.button(text="🏷 Бренд", callback_data=AdminCB(act="user_brand", id=target.id).pack())
         kb.button(text="🏬 Точка", callback_data=AdminCB(act="user_outlet", id=target.id).pack())
+        if target.role_code in (RoleCode.OPS_DIRECTOR, RoleCode.OUTLET_ADMIN):
+            kb.button(
+                text="🏢 Закреплённые объекты",
+                callback_data=AdminCB(act="scope_card", id=target.id).pack(),
+            )
         if target.role_code == RoleCode.EXECUTOR:
             kb.button(
                 text="🗂 Направления мастера",
@@ -1339,3 +1350,193 @@ async def cat_add_emoji(
         "Не забудьте привязать к ней исполнителя: 👷 Исполнители → направления.",
         reply_markup=main_menu(user),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Закреплённые объекты руководителя (п.3 ТЗ по правам)
+# --------------------------------------------------------------------------- #
+@router.callback_query(AdminCB.filter(F.act == "scope_card"))
+async def cb_scope_card(
+    call: types.CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: Optional[User],
+) -> None:
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    target = await session.scalar(
+        select(User).where(User.id == callback_data.id).options(
+            selectinload(User.scopes).selectinload(UserScope.brand),
+            selectinload(User.scopes).selectinload(UserScope.outlet),
+        )
+    )
+    if target is None:
+        await call.answer("Пользователь не найден", show_alert=True)
+        return
+
+    own = []
+    if target.brand_id:
+        brand = await session.get(Brand, target.brand_id)
+        own.append(f"{brand.name} (свой бренд)" if brand else "—")
+    if target.outlet_id:
+        outlet = await session.get(Outlet, target.outlet_id)
+        own.append(f"{outlet.name} (своя точка)" if outlet else "—")
+
+    lines = [
+        f"🏢 <b>Объекты: {esc(target.full_name)}</b>",
+        f"Роль: {target.role_title}",
+        "",
+        "<b>Основной доступ:</b>",
+        *[f"• {esc(x)}" for x in (own or ["не задан"])],
+        "",
+        "<b>Дополнительно закреплено администратором:</b>",
+    ]
+    kb = InlineKeyboardBuilder()
+    if not target.scopes:
+        lines.append("— ничего")
+    for sc in target.scopes:
+        lines.append(f"• {esc(sc.label)}")
+        kb.button(
+            text=f"🗑 {sc.label}"[:60],
+            callback_data=AdminCB(act="scope_del", id=target.id, id2=sc.id).pack(),
+        )
+    kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(
+            text="➕ Закрепить объект",
+            callback_data=AdminCB(act="scope_add", id=target.id).pack(),
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=AdminCB(act="user_card", id=target.id).pack()
+        )
+    )
+    await call.answer()
+    await call.message.edit_text("\n".join(lines), reply_markup=kb.as_markup())
+
+
+@router.callback_query(AdminCB.filter(F.act == "scope_add"))
+async def cb_scope_add(
+    call: types.CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: Optional[User],
+) -> None:
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    brands = (await session.scalars(select(Brand).order_by(Brand.sort_order))).all()
+    kb = InlineKeyboardBuilder()
+    for brand in brands:
+        kb.button(
+            text=f"{brand.name} — весь бренд",
+            callback_data=AdminCB(
+                act="scope_save", id=callback_data.id, id2=brand.id, value="brand"
+            ).pack(),
+        )
+    for brand in brands:
+        kb.button(
+            text=f"Точка бренда {brand.name} →",
+            callback_data=AdminCB(
+                act="scope_outlets", id=callback_data.id, id2=brand.id
+            ).pack(),
+        )
+    kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=AdminCB(act="scope_card", id=callback_data.id).pack(),
+        )
+    )
+    await call.answer()
+    await call.message.edit_text(
+        "Что закрепить за этим руководителем дополнительно?",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(AdminCB.filter(F.act == "scope_outlets"))
+async def cb_scope_outlets(
+    call: types.CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: Optional[User],
+) -> None:
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    outlets = (
+        await session.scalars(
+            select(Outlet)
+            .where(Outlet.brand_id == callback_data.id2, Outlet.is_active.is_(True))
+            .order_by(Outlet.sort_order)
+        )
+    ).all()
+    kb = InlineKeyboardBuilder()
+    for outlet in outlets:
+        kb.button(
+            text=outlet.name,
+            callback_data=AdminCB(
+                act="scope_save", id=callback_data.id, id2=outlet.id, value="outlet"
+            ).pack(),
+        )
+    kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=AdminCB(act="scope_add", id=callback_data.id).pack(),
+        )
+    )
+    await call.answer()
+    await call.message.edit_text("Выберите точку:", reply_markup=kb.as_markup())
+
+
+@router.callback_query(AdminCB.filter(F.act == "scope_save"))
+async def cb_scope_save(
+    call: types.CallbackQuery,
+    callback_data: AdminCB,
+    session: AsyncSession,
+    user: Optional[User],
+    bot: Bot,
+) -> None:
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    target = await session.get(User, callback_data.id)
+    if callback_data.value == "outlet":
+        outlet = await session.get(Outlet, callback_data.id2)
+        scope_row = UserScope(
+            user_id=target.id, outlet_id=outlet.id, brand_id=outlet.brand_id,
+            created_by_id=user.id,
+        )
+        label = outlet.name
+    else:
+        brand = await session.get(Brand, callback_data.id2)
+        scope_row = UserScope(
+            user_id=target.id, brand_id=brand.id, created_by_id=user.id
+        )
+        label = f"{brand.name} (весь бренд)"
+    session.add(scope_row)
+    await session.commit()
+    await call.answer("Объект закреплён")
+    if target.tg_id:
+        try:
+            await bot.send_message(
+                target.tg_id,
+                f"ℹ️ Вам дополнительно открыт доступ к объекту: <b>{esc(label)}</b>.",
+            )
+        except Exception:
+            pass
+    await cb_scope_card(call, AdminCB(act="scope_card", id=target.id), session, user)
+
+
+@router.callback_query(AdminCB.filter(F.act == "scope_del"))
+async def cb_scope_del(
+    call: types.CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: Optional[User],
+) -> None:
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    row = await session.get(UserScope, callback_data.id2)
+    if row is not None:
+        await session.delete(row)
+        await session.commit()
+    await call.answer("Доступ к объекту снят")
+    await cb_scope_card(call, AdminCB(act="scope_card", id=callback_data.id), session, user)

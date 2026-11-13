@@ -38,16 +38,19 @@ def main_menu(user: Optional[User]) -> ReplyKeyboardMarkup:
         return kb.as_markup(resize_keyboard=True)
 
     role = user.role_code
-    kb.row(KeyboardButton(text=BTN_NEW))
+    if not user.is_viewer:
+        kb.row(KeyboardButton(text=BTN_NEW))
 
     if role == RoleCode.EXECUTOR:
         kb.row(KeyboardButton(text=BTN_TASKS), KeyboardButton(text=BTN_MY))
+    elif user.is_viewer:
+        kb.row(KeyboardButton(text=BTN_STATUS))
     else:
         kb.row(KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_CONFIRM_QUEUE))
 
     if role == RoleCode.OUTLET_ADMIN:
         kb.row(KeyboardButton(text=BTN_OUTLET_REQUESTS))
-    elif role == RoleCode.OPS_DIRECTOR:
+    elif role in (RoleCode.OPS_DIRECTOR, RoleCode.OPS_CHIEF):
         kb.row(KeyboardButton(text=BTN_BRAND_REQUESTS))
 
     kb.row(KeyboardButton(text=BTN_ORG), KeyboardButton(text=BTN_STATUS))

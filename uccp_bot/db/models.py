@@ -39,15 +39,17 @@ class RoleCode:
 
     STAFF = "staff"                  # Сотрудник / менеджер точки — свои заявки
     OUTLET_ADMIN = "outlet_admin"    # Администратор точки — все заявки своей точки
-    OPS_DIRECTOR = "ops"             # Операционный директор — все точки своего бренда
+    OPS_CHIEF = "ops_chief"          # Главный операционный директор — все бренды, только просмотр
+    OPS_DIRECTOR = "ops"             # Операционный директор — свой бренд, только просмотр
     EXECUTOR = "executor"            # Мастер / исполнитель — только назначенные ему
     UCCP_STAFF = "uccp_staff"        # Сотрудник УЦЦП — обрабатывает обращения точек
     ADMIN = "admin"                  # Администратор системы — полный доступ
 
-    ALL = (STAFF, OUTLET_ADMIN, OPS_DIRECTOR, EXECUTOR, UCCP_STAFF, ADMIN)
+    ALL = (STAFF, OUTLET_ADMIN, OPS_CHIEF, OPS_DIRECTOR, EXECUTOR, UCCP_STAFF, ADMIN)
     TITLES = {
         STAFF: "Сотрудник / менеджер точки",
         OUTLET_ADMIN: "Администратор точки",
+        OPS_CHIEF: "Главный операционный директор",
         OPS_DIRECTOR: "Операционный директор",
         EXECUTOR: "Мастер / исполнитель",
         UCCP_STAFF: "Сотрудник УЦЦП",
@@ -56,7 +58,8 @@ class RoleCode:
     DESCRIPTIONS = {
         STAFF: "создаёт заявки и видит только свои",
         OUTLET_ADMIN: "видит все заявки своей торговой точки",
-        OPS_DIRECTOR: "видит все заявки своего бренда",
+        OPS_CHIEF: "видит всё по обоим брендам, только просмотр и отчёты",
+        OPS_DIRECTOR: "видит свой бренд и закреплённые объекты, только просмотр",
         EXECUTOR: "видит только назначенные ему заявки",
         UCCP_STAFF: "принимает и обрабатывает обращения точек в УЦЦП",
         ADMIN: "полный доступ, подтверждает регистрации",
@@ -121,6 +124,26 @@ class Status:
         DONE,
     )
     FINAL = (CLOSED, REJECTED, CANCELLED)
+
+    @classmethod
+    def title(cls, code: str) -> str:
+        return cls.TITLES.get(code, code)
+
+
+class CostStatus:
+    """Согласование стоимости работ."""
+
+    NONE = "none"          # стоимость ещё не заявлена
+    PENDING = "pending"    # отправлена на согласование, исполнителю правка закрыта
+    APPROVED = "approved"  # согласована главным администратором
+    REJECTED = "rejected"  # отклонена, исполнитель может заявить заново
+
+    TITLES = {
+        NONE: "не заявлена",
+        PENDING: "⏳ на согласовании",
+        APPROVED: "✅ согласована",
+        REJECTED: "❌ отклонена",
+    }
 
     @classmethod
     def title(cls, code: str) -> str:
@@ -267,6 +290,11 @@ class User(Base):
         cascade="all, delete-orphan",
         foreign_keys="ExecutorAssignment.user_id",
     )
+    scopes: Mapped[List["UserScope"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="UserScope.user_id",
+    )
 
     # ------------------------------------------------------------------ #
     # Отображение
@@ -319,6 +347,8 @@ class User(Base):
         """Что пользователь видит: all | brand | outlet | assigned | own."""
         if self.is_admin:
             return "all"
+        if self.is_ops_chief:
+            return "all"
         if self.is_ops_director:
             return "brand"
         if self.is_outlet_admin:
@@ -328,15 +358,47 @@ class User(Base):
         return "own"
 
     @property
+    def is_viewer(self) -> bool:
+        """Руководители наблюдают и контролируют: просмотр, мониторинг, отчёты.
+
+        Без редактирования, подтверждения и удаления заявок (матрица прав ТЗ).
+        """
+        return self.role_code in (RoleCode.OPS_CHIEF, RoleCode.OPS_DIRECTOR)
+
+    @property
+    def is_ops_chief(self) -> bool:
+        return self.role_code == RoleCode.OPS_CHIEF
+
+    @property
     def can_confirm(self) -> bool:
-        """Кто может подтверждать выполнение (п.22-23). Исполнитель — не может."""
+        """Подтверждает выполнение инициатор, администратор точки или главный админ.
+
+        Исполнитель — не может. Руководители — только наблюдают.
+        """
         return self.is_approved and self.role_code in (
             RoleCode.STAFF,
             RoleCode.OUTLET_ADMIN,
-            RoleCode.OPS_DIRECTOR,
             RoleCode.UCCP_STAFF,
             RoleCode.ADMIN,
         )
+
+    @property
+    def can_edit_locked(self) -> bool:
+        """Менять зафиксированные данные (срок, стоимость) вправе только главный админ."""
+        return self.is_approved and self.role_code == RoleCode.ADMIN
+
+    @property
+    def can_delete_requests(self) -> bool:
+        return self.is_approved and self.role_code == RoleCode.ADMIN
+
+    @property
+    def can_manage_users(self) -> bool:
+        return self.is_approved and self.role_code == RoleCode.ADMIN
+
+    @property
+    def can_approve_cost(self) -> bool:
+        """Согласование стоимости работ — за главным администратором."""
+        return self.is_approved and self.role_code == RoleCode.ADMIN
 
     @property
     def payment_title(self) -> str:
@@ -348,8 +410,10 @@ class User(Base):
 
     @property
     def can_see_reports(self) -> bool:
+        """Выгрузка отчётов: админ, руководители, администратор точки. Исполнитель — нет."""
         return self.is_approved and self.role_code in (
             RoleCode.OUTLET_ADMIN,
+            RoleCode.OPS_CHIEF,
             RoleCode.OPS_DIRECTOR,
             RoleCode.UCCP_STAFF,
             RoleCode.ADMIN,
@@ -358,6 +422,37 @@ class User(Base):
     def sync_flags(self) -> None:
         """is_active держим согласованным со статусом — им пользуется маршрутизация."""
         self.is_active = self.status == UserStatus.ACTIVE
+
+
+class UserScope(Base):
+    """Дополнительные объекты, закреплённые за руководителем главным админом.
+
+    Операционный директор видит свой бренд плюс всё, что здесь перечислено
+    (другой бренд целиком или отдельные точки).
+    """
+
+    __tablename__ = "user_scopes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    brand_id: Mapped[Optional[int]] = mapped_column(ForeignKey("brands.id"), nullable=True)
+    outlet_id: Mapped[Optional[int]] = mapped_column(ForeignKey("outlets.id"), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
+    created_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    user: Mapped["User"] = relationship(
+        back_populates="scopes", foreign_keys=[user_id]
+    )
+    brand: Mapped[Optional[Brand]] = relationship()
+    outlet: Mapped[Optional[Outlet]] = relationship()
+
+    @property
+    def label(self) -> str:
+        if self.outlet:
+            return self.outlet.name
+        if self.brand:
+            return f"{self.brand.name} (весь бренд)"
+        return "—"
 
 
 class ExecutorAssignment(Base):
@@ -432,6 +527,17 @@ class Request(Base):
         DateTime, nullable=True
     )
     source_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # --- фиксация данных (матрица прав ТЗ) ---
+    # после отправки на согласование исполнитель эти поля не меняет
+    cost_status: Mapped[str] = mapped_column(String(16), default=CostStatus.NONE)
+    cost_submitted_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    cost_decided_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    cost_decided_by_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )  # кто согласовал или отклонил
+    cost_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    due_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Работа входит в фиксированную ежемесячную оплату мастера — отдельной
     # суммы к оплате по заявке нет. Отметка ставится в момент выполнения,
     # поэтому история остаётся верной даже если условия мастера поменяются.
@@ -462,6 +568,22 @@ class Request(Base):
     @property
     def total_cost(self) -> float:
         return float(self.work_cost or 0) + float(self.material_cost or 0)
+
+    @property
+    def cost_locked(self) -> bool:
+        """Стоимость отправлена на согласование или уже согласована."""
+        return self.cost_status in (CostStatus.PENDING, CostStatus.APPROVED)
+
+    @property
+    def cost_status_title(self) -> str:
+        return CostStatus.title(self.cost_status)
+
+    def executor_can_edit_cost(self) -> bool:
+        """Исполнитель правит стоимость только до отправки на согласование."""
+        return not self.cost_locked
+
+    def executor_can_edit_due(self) -> bool:
+        return not self.due_locked
 
     @property
     def cost_title(self) -> str:

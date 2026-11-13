@@ -127,6 +127,9 @@ async def main() -> None:
         check(BTN_REPORTS in menu_labels(outlet_admin), "У администратора точки есть отчёты")
         check(BTN_BRAND_REQUESTS in menu_labels(ops), "У опердира есть «Заявки бренда»")
         check(BTN_ADMIN not in menu_labels(ops), "У опердира нет панели администрирования")
+        from uccp_bot.keyboards.common import BTN_NEW
+        check(BTN_NEW not in menu_labels(ops),
+              "Наблюдателю не предлагают создавать заявки")
         check(BTN_ADMIN in menu_labels(sysadmin), "У администратора системы есть панель")
         check(BTN_OUTLET_REQUESTS not in menu_labels(staff),
               "Сотрудник не видит заявки всей точки")
@@ -172,8 +175,11 @@ async def main() -> None:
 
         print("\n=== Подтверждение работ ===")
         check(not nazrullo.can_confirm, "Исполнитель не может подтверждать выполнение")
-        check(outlet_admin.can_confirm and ops.can_confirm and staff.can_confirm,
-              "Инициатор и руководители могут подтверждать")
+        check(outlet_admin.can_confirm and staff.can_confirm,
+              "Подтверждают инициатор и администратор точки")
+        check(not ops.can_confirm and ops.is_viewer,
+              "Операционный директор только наблюдает — подтверждение ему закрыто")
+        check(ops.can_see_reports, "Но отчёты руководителю доступны")
 
     print("\n🎉 Разграничение доступа работает.")
 

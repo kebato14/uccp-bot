@@ -23,6 +23,7 @@ from ..keyboards.common import (
     main_menu,
 )
 from ..keyboards.request import card_kb, simple_card_kb
+from ..services import scope
 from ..services.cards import REQUEST_LOAD_OPTIONS, load_request, render_card, render_comments
 from ..services.history import render_history
 from ..services.notify import send_attachments
@@ -39,8 +40,8 @@ def _base_query():
 
 
 def scope_condition(user: User):
-    """Что пользователь вправе видеть (см. роли в db/models.py)."""
-    if user.is_admin:
+    """Устаревшая синхронная версия — оставлена для тестов и совместимости."""
+    if user.is_admin or user.is_ops_chief:
         return None
     if user.is_ops_director:
         return Request.brand_id == user.brand_id if user.brand_id else Request.id < 0
@@ -61,7 +62,7 @@ async def _fetch(session: AsyncSession, kind: str, user: User, page: int):
             Request.executor_id == user.id, Request.status.in_(Status.OPEN)
         )
     else:
-        condition = scope_condition(user)
+        condition = await scope.request_condition(session, user)
         if condition is not None:
             stmt = stmt.where(condition)
         if kind == "confirm":
@@ -220,7 +221,7 @@ async def brand_requests(
     if user is None or not user.is_approved:
         await message.answer(texts.NOT_REGISTERED)
         return
-    if not (user.is_ops_director or user.is_admin):
+    if not (user.is_ops_director or user.is_ops_chief or user.is_admin):
         await message.answer(texts.NO_ACCESS)
         return
     await message.answer(
@@ -293,7 +294,8 @@ async def find_by_number(
 
 
 def _can_view(user: User, request: Request) -> bool:
-    if user.is_admin:
+    """Быстрая проверка без обращения к базе (без закреплённых объектов)."""
+    if user.is_admin or user.is_ops_chief:
         return True
     if request.author_id == user.id or request.executor_id == user.id:
         return True
@@ -302,6 +304,11 @@ def _can_view(user: User, request: Request) -> bool:
     if user.is_outlet_admin:
         return request.outlet_id == user.outlet_id
     return False
+
+
+async def can_view(session: AsyncSession, user: User, request: Request) -> bool:
+    """Полная проверка, включая объекты, закреплённые администратором."""
+    return await scope.can_view_request(session, user, request)
 
 
 @router.callback_query(ReqCB.filter(F.act == "card"))
@@ -314,7 +321,7 @@ async def open_card(
 ) -> None:
     await state.clear()
     request = await load_request(session, callback_data.request_id)
-    if request is None or user is None or not _can_view(user, request):
+    if request is None or user is None or not await can_view(session, user, request):
         await call.answer(texts.NO_ACCESS, show_alert=True)
         return
     await call.answer()

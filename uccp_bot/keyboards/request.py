@@ -7,7 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..callbacks import ReqCB
-from ..db.models import Request, RoleCode, Status, User
+from ..db.models import CostStatus, Request, RoleCode, Status, User
 
 
 def _btn(text: str, act: str, request_id: int, value: str = "") -> InlineKeyboardButton:
@@ -20,20 +20,26 @@ def executor_kb(request: Request) -> InlineKeyboardMarkup:
     rid = request.id
     kb = InlineKeyboardBuilder()
     status = request.status
+    # срок и стоимость правятся только до отправки на согласование
+    can_due = request.executor_can_edit_due()
 
     if status in (Status.NEW, Status.AWAITING_ASSIGNMENT):
         kb.row(_btn("✅ Принять", "accept", rid))
-        kb.row(_btn("📅 Предложить другое время", "propose", rid))
+        if can_due:
+            kb.row(_btn("📅 Предложить другое время", "propose", rid))
         kb.row(_btn("❌ Отклонить", "reject", rid))
     elif status == Status.RESCHEDULE_PROPOSED:
         kb.row(_btn("💬 Добавить комментарий", "comment", rid))
     elif status == Status.ACCEPTED:
         kb.row(_btn("▶️ Начать работу", "start", rid))
         kb.row(_btn("💬 Добавить комментарий", "comment", rid))
-        kb.row(_btn("📅 Предложить другое время", "propose", rid))
+        if can_due:
+            kb.row(_btn("📅 Предложить другое время", "propose", rid))
     elif status in (Status.IN_PROGRESS, Status.RETURNED):
         kb.row(_btn("✅ Работа выполнена", "done", rid))
         kb.row(_btn("💬 Добавить комментарий", "comment", rid))
+    if request.cost_status == CostStatus.REJECTED:
+        kb.row(_btn("💰 Заявить стоимость заново", "cost_again", rid))
     kb.row(_btn("🕓 История", "history", rid), _btn("📎 Файлы", "media", rid))
     return kb.as_markup()
 
@@ -75,10 +81,15 @@ def admin_assign_kb(request: Request) -> InlineKeyboardMarkup:
 def admin_kb(request: Request) -> InlineKeyboardMarkup:
     rid = request.id
     kb = InlineKeyboardBuilder()
+    if request.cost_status == CostStatus.PENDING:
+        kb.row(_btn("✅ Согласовать стоимость", "cost_ok", rid))
+        kb.row(_btn("❌ Отклонить стоимость", "cost_no", rid))
     if request.status not in Status.FINAL:
         kb.row(_btn("➡️ Перенаправить", "assign", rid))
         kb.row(_btn("✏️ Изменить категорию", "change_category", rid))
         kb.row(_btn("📅 Изменить срок", "change_due", rid))
+    if request.cost_status in (CostStatus.APPROVED, CostStatus.PENDING):
+        kb.row(_btn("💰 Изменить стоимость", "edit_cost", rid))
     if request.status == Status.DONE:
         kb.row(_btn("✅ Подтвердить", "confirm", rid))
         kb.row(_btn("🔄 Вернуть на доработку", "return", rid))
@@ -88,8 +99,20 @@ def admin_kb(request: Request) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def viewer_kb(request: Request) -> InlineKeyboardMarkup:
+    """Руководители только наблюдают: никаких действий с заявкой."""
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _btn("🕓 История", "history", request.id),
+        _btn("📎 Файлы", "media", request.id),
+    )
+    return kb.as_markup()
+
+
 def card_kb(request: Request, user: User) -> InlineKeyboardMarkup:
     """Подбирает клавиатуру по роли пользователя относительно заявки."""
+    if user.is_viewer:
+        return viewer_kb(request)
     if user.is_executor and request.executor_id == user.id:
         return executor_kb(request)
     if user.is_admin:

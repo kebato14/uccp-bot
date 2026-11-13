@@ -88,6 +88,10 @@ class AdminFlow(StatesGroup):
     assign_pick = State()
     cancel_reason = State()
     set_phone = State()
+    cost_reason = State()
+    edit_cost_work = State()
+    edit_cost_material = State()
+    edit_reason = State()
 
 
 class ReportFlow(StatesGroup):

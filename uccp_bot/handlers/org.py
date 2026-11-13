@@ -35,7 +35,7 @@ from ..db.models import (
 )
 from ..keyboards.calendar import calendar_kb, time_kb
 from ..keyboards.common import BTN_CANCEL, BTN_ORG, cancel_kb, main_menu
-from ..services import notify, org
+from ..services import notify, org, scope
 from ..services.numbering import new_external_id, next_org_number
 from ..states import NewOrgRequest, OrgFlow
 from ..utils import esc, fmt_dt, utc_from_local, utcnow
@@ -137,7 +137,7 @@ async def _fetch(session: AsyncSession, kind: str, user: User, page: int):
     elif kind == "mine":
         stmt = stmt.where(OrgRequest.author_id == user.id)
     else:
-        condition = org.scope_condition(user)
+        condition = await scope.org_condition(session, user)
         if condition is not None:
             stmt = stmt.where(condition)
         if kind == "inbox":

@@ -26,6 +26,12 @@ COLUMNS = [
     ("users", "fixed_payment", "BOOLEAN DEFAULT 0"),
     ("requests", "cost_exempt", "BOOLEAN DEFAULT 0"),
     ("requests", "due_soon_notified_at", "DATETIME"),
+    ("requests", "cost_status", "VARCHAR(16) DEFAULT 'none'"),
+    ("requests", "cost_submitted_at", "DATETIME"),
+    ("requests", "cost_decided_at", "DATETIME"),
+    ("requests", "cost_decided_by_id", "INTEGER"),
+    ("requests", "cost_reject_reason", "TEXT"),
+    ("requests", "due_locked", "BOOLEAN DEFAULT 0"),
     ("org_requests", "due_soon_notified_at", "DATETIME"),
     ("org_requests", "request_type", "VARCHAR(16) DEFAULT 'task'"),
     ("org_requests", "quantity", "VARCHAR(120)"),
@@ -53,6 +59,14 @@ async def migrate(engine: AsyncEngine) -> None:
                 )
                 log.info("Миграция: добавлена колонка %s.%s", table, column)
 
+        # у уже закрытых заявок стоимость считается согласованной
+        await conn.execute(
+            text(
+                "UPDATE requests SET cost_status = 'approved' "
+                "WHERE cost_status IN ('none','') AND status IN ('closed','confirmed') "
+                "AND (work_cost IS NOT NULL OR material_cost IS NOT NULL)"
+            )
+        )
         # старые роли -> новые
         await conn.execute(
             text("UPDATE users SET role_code = 'staff' WHERE role_code = 'manager'")
