@@ -282,6 +282,44 @@ async def main() -> None:
               "В карточке пометка вместо стоимости")
         check("Работы:" not in card, "Строк со стоимостью в карточке нет")
 
+        # --- Напоминание о незакрытых задачах ---
+        print("\n--- Напоминание о незакрытых ---")
+        from uccp_bot.services import reminders
+
+        # заявка, по которой ход за мастером
+        pending = await make_request(session, manager, brand, outlet, electric)
+        pending.executor_id = nazrullo.id
+        pending.status = Status.NEW
+        await session.commit()
+
+        digests = await reminders.build_digests(session)
+        check(bool(digests), f"Сводки собраны: получателей {len(digests)}")
+
+        naz_digest = next(
+            (d for d in digests.values() if d.user.full_name == "Назрулло"), None
+        )
+        check(naz_digest is not None, "Мастеру есть что напомнить")
+        text_naz = naz_digest.render()
+        check("Незакрытые задачи" in text_naz, "Заголовок сводки на месте")
+        check("REQ-" in text_naz, "В сводке перечислены конкретные заявки")
+
+        admin_digest = next(
+            (d for d in digests.values() if d.user.full_name == "Админ УЦЦП"), None
+        )
+        check(admin_digest is not None, "Администратору напоминают о нераспределённых")
+        check("Нужно назначить исполнителя" in admin_digest.render(),
+              "Администратор видит заявки без исполнителя")
+
+        # каждому — только его задачи
+        for d in digests.values():
+            if d.user.is_executor:
+                check("Нужно назначить исполнителя" not in d.render(),
+                      f"{d.user.full_name}: чужих задач в сводке нет")
+
+        summary = reminders.render_summary(digests)
+        check("Получателей" in summary and "задач всего" in summary,
+              "Сводка для администратора формируется")
+
         # --- Отчёты и Excel ---
         print("\n--- Отчёты ---")
         today = dt.date.today()

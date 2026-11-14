@@ -50,6 +50,7 @@ def _root_kb() -> types.InlineKeyboardMarkup:
         ("👥 Пользователи и роли", "users"),
         ("🏬 Торговые точки", "outlets"),
         ("🗂 Категории", "categories"),
+        ("🔔 Напомнить о незакрытых", "remind"),
         ("💾 Резервная копия", "backup"),
     ]
     for label, act in buttons:
@@ -1540,3 +1541,60 @@ async def cb_scope_del(
         await session.commit()
     await call.answer("Доступ к объекту снят")
     await cb_scope_card(call, AdminCB(act="scope_card", id=callback_data.id), session, user)
+
+
+# --------------------------------------------------------------------------- #
+# Напоминание о незакрытых задачах
+# --------------------------------------------------------------------------- #
+@router.callback_query(AdminCB.filter(F.act == "remind"))
+async def cb_remind_preview(
+    call: types.CallbackQuery, session: AsyncSession, user: Optional[User]
+) -> None:
+    """Сначала показываем, кому и сколько уйдёт — только потом рассылаем."""
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    from ..services import reminders
+
+    digests = await reminders.build_digests(session)
+    await call.answer()
+    if not digests:
+        await call.message.edit_text(
+            "🔔 Незакрытых задач нет — напоминать некому.", reply_markup=_back_kb()
+        )
+        return
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📤 Разослать напоминания", callback_data=AdminCB(act="remind_send").pack())
+    kb.button(text="⬅️ Отмена", callback_data=AdminCB(act="root").pack())
+    kb.adjust(1)
+    await call.message.edit_text(
+        reminders.render_summary(digests)
+        + "\n\nКаждый получит одну личную сводку только по своим задачам.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(AdminCB.filter(F.act == "remind_send"))
+async def cb_remind_send(
+    call: types.CallbackQuery, session: AsyncSession, user: Optional[User], bot: Bot
+) -> None:
+    if not _require_admin(user):
+        await call.answer(texts.NO_ACCESS, show_alert=True)
+        return
+    from ..services import notify, reminders
+
+    await call.answer("Рассылаю…")
+    digests = await reminders.build_digests(session)
+    sent = failed = 0
+    for digest in digests.values():
+        if await notify.send_to_user(bot, digest.user, digest.render()):
+            sent += 1
+        else:
+            failed += 1
+
+    note = f"\nНе доставлено: {failed} (не активировали бота)" if failed else ""
+    await call.message.edit_text(
+        f"✅ Напоминания разосланы: <b>{sent}</b>{note}",
+        reply_markup=_back_kb(),
+    )

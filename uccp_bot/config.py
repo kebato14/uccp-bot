@@ -33,6 +33,8 @@ class Config:
     overdue_check_minutes: int = int(os.getenv("OVERDUE_CHECK_MINUTES", "15"))
     # за сколько часов до срока предупреждать исполнителя
     due_soon_hours: int = int(os.getenv("DUE_SOON_HOURS", "3"))
+    # час ежедневного напоминания о незакрытых задачах
+    reminder_hour: int = int(os.getenv("REMINDER_HOUR", "10"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     # сеть до Telegram: короткий long-poll и таймаут чуть больше него,
     # чтобы обрыв связи обнаруживался за секунды, а не за минуту

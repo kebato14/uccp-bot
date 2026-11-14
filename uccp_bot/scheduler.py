@@ -340,6 +340,27 @@ async def daily_backup(session_maker: async_sessionmaker, bot: Bot) -> None:
                     log.warning("Копию не удалось отправить в Telegram: %s", exc)
 
 
+async def daily_reminders(session_maker: async_sessionmaker, bot: Bot) -> None:
+    """Ежедневная личная сводка по незакрытым задачам."""
+    from .services import reminders
+
+    async with session_maker() as session:
+        digests = await reminders.build_digests(session)
+        if not digests:
+            log.info("Незакрытых задач нет — напоминания не отправлялись")
+            return
+        sent = 0
+        for digest in digests.values():
+            if await notify.send_to_user(bot, digest.user, digest.render()):
+                sent += 1
+        log.info("Напоминаний о незакрытых задачах отправлено: %s", sent)
+
+        # администраторам — короткая сводка, кому напомнили
+        summary = reminders.render_summary(digests)
+        for person in await _recipients(session):
+            await notify.send_to_user(bot, person, summary)
+
+
 def setup_scheduler(session_maker: async_sessionmaker, bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=config.timezone)
     scheduler.add_job(
@@ -361,6 +382,13 @@ def setup_scheduler(session_maker: async_sessionmaker, bot: Bot) -> AsyncIOSched
         IntervalTrigger(minutes=config.overdue_check_minutes),
         args=(session_maker, bot),
         id="check_due_soon",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        daily_reminders,
+        CronTrigger(hour=config.reminder_hour, minute=0),
+        args=(session_maker, bot),
+        id="daily_reminders",
         replace_existing=True,
     )
     scheduler.add_job(
